@@ -18,7 +18,7 @@
     "cli": "tsx src/cli.ts"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=18"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

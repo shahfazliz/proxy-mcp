@@ -53,14 +53,19 @@ Both files must be clean PEM (no Bag Attributes, no PKCS12 wrapping).
   "mcpServers": {
     "shah-proxy": {
       "command": "npx",
-      "args": ["-y", "@shahfazliz/proxy-mcp", "--ca-dir", "/absolute/path/to/.proxy-ca"],
+      "args": [
+        "-y",
+        "git+https://github.com/shahfazliz/proxy-mcp",
+        "--ca-dir",
+        "/absolute/path/to/.proxy-ca"
+      ],
       "enabled": true
     }
   }
 }
 ```
 
-If your `.proxy-ca/` is in the project directory where Cursor launches, you can omit `--ca-dir` — it defaults to `$PWD/.proxy-ca/`.
+The `--ca-dir` must point to a directory containing `cert.pem` and `key.pem` (see step 1). This is typically your Charles CA directory at `~/Library/Application Support/Charles/ca/` or an extracted `.proxy-ca/` folder in your project.
 
 ## Quick start
 
