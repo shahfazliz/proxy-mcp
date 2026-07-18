@@ -22,6 +22,8 @@ import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 
 const execFileAsync = promisify(execFile);
 

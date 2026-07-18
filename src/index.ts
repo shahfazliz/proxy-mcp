@@ -5,6 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { proxy, ProxyManager, DEFAULT_PORT, type JsonPatch } from "./proxy.js";
 import { getCaCertPath, getCaKeyPath, setCaDir, ensureCA, sha256Fingerprint } from "./ca.js";
@@ -476,8 +478,9 @@ export async function main(): Promise<void> {
 }
 
 // Only auto-start the stdio transport when run directly (keeps the module
-// importable for tests / preflight checks).
-if (import.meta.url === `file://${process.argv[1]}`) {
+// importable for tests / preflight checks). Uses realpath to handle symlinks
+// (e.g. when npx installs from git and runs the bin through a symlink).
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {
   main().catch((err) => {
     console.error("Fatal:", err);
     process.exit(1);
