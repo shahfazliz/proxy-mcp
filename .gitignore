@@ -1,0 +1,26 @@
+node_modules/
+dist/
+*.log
+
+# Persistent MITM CA — private key must NEVER be committed
+.proxy-ca/
+
+# Charles CA export material (the .p12 contains the private key)
+*.p12
+cacert.pem
+
+# Captured traffic exports
+*.har
+traffic-*.json
+
+# Machine-local MCP config
+.mcp.json
+
+# macOS
+.DS_Store
+
+# OneDrive wiki symlink (machine-local)
+wiki
+
+# Local test data
+fixtures/
