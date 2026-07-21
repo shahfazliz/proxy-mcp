@@ -87,8 +87,10 @@ async function main() {
     }
     case "ca:import": {
       const p12Idx = args.indexOf("--p12");
+      const passwordIdx = args.indexOf("--password");
+      const password = (passwordIdx !== -1 && args[passwordIdx + 1]) ? args[passwordIdx + 1] : "";
       if (p12Idx === -1 || !args[p12Idx + 1]) {
-        console.error("Usage: ca:import --p12 /path/to/charles-ssl-proxying.p12");
+        console.error("Usage: ca:import --p12 /path/to/charles-ssl-proxying.p12 [--password yourpassword]");
         process.exit(1);
       }
       const p12Path = args[p12Idx + 1];
@@ -96,12 +98,12 @@ async function main() {
       await mkdir(caDir, { recursive: true });
       await execFileAsync("openssl", [
         "pkcs12", "-in", p12Path, "-nocerts", "-nodes",
-        "-passin", "pass:",
+        "-passin", `pass:${password}`,
         "-out", getCaKeyPath(),
       ]);
       await execFileAsync("openssl", [
         "pkcs12", "-in", p12Path, "-clcerts", "-nokeys",
-        "-passin", "pass:",
+        "-passin", `pass:${password}`,
         "-out", getCaCertPath(),
       ]);
       console.log(`CA imported:\n  dir: ${caDir}\n  cert: ${getCaCertPath()}\n  key:  ${getCaKeyPath()}`);
@@ -173,8 +175,9 @@ Commands:
   status        Proxy health / diagnostics
   ca-info       CA certificate path, fingerprint, and network info
   ca:status     CA fingerprint and path status
-  ca:import     Extract CA from Charles .p12
-    --p12 <path>        Path to charles-ssl-proxying.p12
+ca:import     Extract CA from Charles .p12
+      --p12 <path>        Path to charles-ssl-proxying.p12
+      --password <pw>     Password for .p12 (optional, default: empty)
   transform     Manage transform rules
     add <method> <url> <patches.json>   Add a transform
     list                                List transforms

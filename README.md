@@ -32,19 +32,28 @@ npx @shahfazliz/proxy-mcp
 
 Charles stores its CA at `~/Library/Application Support/Charles/ca/`. Extract the cert and key into your project's `.proxy-ca/` directory:
 
-```bash
-# From Charles's .p12 export
-mkdir -p .proxy-ca
-openssl pkcs12 -in ~/Library/Application\ Support/Charles/ca/charles-ssl-proxying.p12 \
-  -nocerts -nodes -out .proxy-ca/key.pem
-openssl pkcs12 -in ~/Library/Application\ Support/Charles/ca/charles-ssl-proxying.p12 \
-  -clcerts -nokeys -out .proxy-ca/cert.pem
+**Step 1: Export the Charles CA (one-time setup)**
+- In Charles: **Help → SSL Proxying → Export Charles Certificate and Private Key**
+- Save as `.p12` file (password-protected or empty password - your choice)
 
-# Or use the built-in CLI
-npx proxy-mcp-cli ca:import --p12 ~/Library/Application\ Support/Charles/ca/charles-ssl-proxying.p12
+**Step 2: Extract to `.proxy-ca/`**
+`.proxy-ca` can be anywhere on your computer. I like to put them in ~/.certificates/ where I put all other certs there
+```bash
+# If exported with password
+npx proxy-mcp-cli ca:import --p12 ~/path/to/charles-ssl-proxying.p12 --password yourpassword
+
+# If exported with empty password (default)
+npx proxy-mcp-cli ca:import --p12 ~/path/to/charles-ssl-proxying.p12
+
+# Or manually extract
+mkdir -p .proxy-ca
+openssl pkcs12 -in ~/path/to/charles-ssl-proxying.p12 \
+  -nocerts -nodes -passin pass:yourpassword -out /path/to/.proxy-ca/key.pem
+openssl pkcs12 -in ~/path/to/charles-ssl-proxying.p12 \
+  -clcerts -nokeys -passin pass:yourpassword -out /path/to/.proxy-ca/cert.pem
 ```
 
-Both files must be clean PEM (no Bag Attributes, no PKCS12 wrapping).
+Both files must be clean PEM (no Bag Attributes, no PKCS12 wrapping). The key must be an unencrypted RSA private key.
 
 ### 2. Register with Cursor / any MCP client
 
