@@ -244,11 +244,104 @@ server.registerTool(
 );
 
 server.registerTool(
+  "proxy_request_transform",
+  {
+    title: "Add a request-modification rule",
+    description:
+      "Intercept a request matching method+URL, modify it (headers, query params, body), forward to the real backend, and return the response. " +
+      "Use setHeaders/removeHeaders to modify headers, setQuery/removeQuery for URL params, and body to replace the request body.",
+    inputSchema: {
+      method: z.string().describe("HTTP method: GET, POST, PUT, DELETE, PATCH, HEAD, or OPTIONS."),
+      url: z.string().describe("URL pattern (glob/substring by default, regex=true for raw regex)."),
+      regex: z.boolean().optional().describe("Treat 'url' as a raw regex (default false)."),
+      setHeaders: z.record(z.string()).optional().describe("Headers to add or override (e.g. { \"x-custom\": \"val\" })."),
+      removeHeaders: z.array(z.string()).optional().describe("Headers to strip from the outgoing request (e.g. [\"x-newrelic\"])."),
+      setQuery: z.record(z.string()).optional().describe("Query params to add or override (e.g. { \"include\": \"extended\" })."),
+      removeQuery: z.array(z.string()).optional().describe("Query params to strip from the URL (e.g. [\"legacy\"])."),
+      body: z.string().optional().describe("Replace the request body (for POST/PUT)."),
+    },
+  },
+  async (args) => {
+    try {
+      const rule = await proxy.addRequestTransform(args);
+      return text({ status: "added", rule });
+    } catch (err) {
+      return fail(err);
+    }
+  },
+);
+
+server.registerTool(
+  "proxy_list_request_transforms",
+  {
+    title: "List active request-modification rules",
+    description: "View the active request transform rules.",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const transforms = proxy.listRequestTransforms();
+      return text({ count: transforms.length, transforms });
+    } catch (err) {
+      return fail(err);
+    }
+  },
+);
+
+server.registerTool(
+  "proxy_clear_request_transforms",
+  {
+    title: "Clear request-modification rules",
+    description: "Remove one request transform rule by id, or all rules if no id is given.",
+    inputSchema: {
+      id: z.string().optional().describe("Rule id to remove. Omit to clear all."),
+    },
+  },
+  async ({ id }) => {
+    try {
+      const removed = await proxy.clearRequestTransforms(id);
+      return text({ status: "cleared", removed });
+    } catch (err) {
+      return fail(err);
+    }
+  },
+);
+
+server.registerTool(
+  "proxy_update_request_transform",
+  {
+    title: "Add or update a request-modification rule (idempotent upsert)",
+    description:
+      "Idempotently upsert a request transform rule by (method + url + regex) key. " +
+      "If a rule with the same key exists, its properties are replaced.",
+    inputSchema: {
+      method: z.string().describe("HTTP method: GET, POST, PUT, DELETE, PATCH, HEAD, or OPTIONS."),
+      url: z.string().describe("URL pattern (glob/substring by default, regex=true for raw regex)."),
+      regex: z.boolean().optional().describe("Treat 'url' as a raw regex (default false)."),
+      setHeaders: z.record(z.string()).optional().describe("Headers to add or override."),
+      removeHeaders: z.array(z.string()).optional().describe("Headers to strip from the outgoing request."),
+      setQuery: z.record(z.string()).optional().describe("Query params to add or override."),
+      removeQuery: z.array(z.string()).optional().describe("Query params to strip from the URL."),
+      body: z.string().optional().describe("Replace the request body."),
+    },
+  },
+  async (args) => {
+    try {
+      const rule = await proxy.updateRequestTransform(args);
+      return text({ status: "upserted", rule });
+    } catch (err) {
+      return fail(err);
+    }
+  },
+);
+
+server.registerTool(
   "proxy_list_traffic",
   {
     title: "List / export captured traffic",
     description:
       "Confirm a rule matched the intended request by inspecting captured traffic. Each entry includes transformOutcome (patched|no_match|not_json|error) and patchesApplied count. " +
+      "Use includeRequestBodyPreviews=true to see POST/PUT body content. Use includeResponseBodyPreviews=true for response samples. " +
       "Optionally export to JSON or HAR (replaces the Charles log-export workflow).",
     inputSchema: {
       filter: z
@@ -256,18 +349,21 @@ server.registerTool(
         .optional()
         .describe("Case-insensitive substring filter on method or URL."),
       export: z.enum(["json", "har"]).optional().describe("Write captured traffic to a file."),
-      includeBodies: z.boolean().optional().describe("Include response body previews in the export (default false)."),
+      includeBodies: z.boolean().optional().describe("Include response body previews (default false). Deprecated: use includeResponseBodyPreviews."),
+      includeRequestBodyPreviews: z.boolean().optional().describe("Include request body previews (default false)."),
+      includeResponseBodyPreviews: z.boolean().optional().describe("Include response body previews (default false)."),
     },
   },
-  async ({ filter, export: exportFormat, includeBodies }) => {
+  async ({ filter, export: exportFormat, includeBodies, includeRequestBodyPreviews, includeResponseBodyPreviews }) => {
     try {
-      const entries = proxy.listTraffic(filter);
+      const showBodies = includeRequestBodyPreviews || includeResponseBodyPreviews || includeBodies;
+      const entries = proxy.listTraffic(filter, { includeBodies: showBodies });
       if (exportFormat) {
         const path = await proxy.exportTraffic(exportFormat, filter);
         return text({ count: entries.length, exported: path, hint: "Use includeBodies=true for body previews." });
       }
-      // Inline: include body previews only if explicitly requested (responseBodyPreview is already on the entry).
-      const result = includeBodies
+      // Inline: include body previews only if explicitly requested.
+      const result = showBodies
         ? entries
         : entries.map((e) => {
             const { responseBodyPreview, ...rest } = e;
@@ -402,9 +498,9 @@ server.registerTool(
 server.registerTool(
   "proxy_save_transforms",
   {
-    title: "Persist transform rules to a JSON file",
+    title: "Persist all transform rules to a JSON file",
     description:
-      "Save all current transform rules to a JSON file for reuse after a proxy restart. Rules are serialized without ids; reload with proxy_load_transforms.",
+      "Save both response and request transform rules to a JSON file for reuse after a proxy restart. Reload with proxy_load_transforms.",
     inputSchema: {
       path: z
         .string()
@@ -459,8 +555,9 @@ server.registerTool(
   },
   async ({ path }) => {
     try {
-      const rules = await proxy.loadTransformsFromFile(path ?? "transforms.json");
-      return text({ status: "loaded", count: rules.length, rules });
+      const result = await proxy.loadTransformsFromFile(path ?? "transforms.json");
+      const total = result.responseTransforms.length + result.requestTransforms.length;
+      return text({ status: "loaded", total, responseTransforms: result.responseTransforms.length, requestTransforms: result.requestTransforms.length, response: result.responseTransforms, request: result.requestTransforms });
     } catch (err) {
       return fail(err);
     }

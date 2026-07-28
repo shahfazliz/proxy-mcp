@@ -15,7 +15,7 @@
  *   npm run cli -- traffic
  */
 
-import { proxy, ProxyManager, DEFAULT_PORT, type TransformRuleInput, type MockRuleInput } from "./proxy.js";
+import { proxy, ProxyManager, DEFAULT_PORT, type TransformRuleInput, type MockRuleInput, type RequestTransformInput } from "./proxy.js";
 import { getCaCertPath, getCaKeyPath, getCaDir, setCaDir, ensureCA, sha256Fingerprint } from "./ca.js";
 import { getLanIp } from "./net.js";
 import { readFile } from "node:fs/promises";
@@ -126,6 +126,27 @@ async function main() {
       }
       break;
     }
+    case "req-transform": {
+      const sub = args[1];
+      if (sub === "add" && args[2] && args[3]) {
+        const input: RequestTransformInput = {
+          method: args[2],
+          url: args[3],
+          setHeaders: args[4] ? JSON.parse(args[4]) : undefined,
+          removeHeaders: args[5] ? JSON.parse(args[5]) : undefined,
+          setQuery: args[6] ? JSON.parse(args[6]) : undefined,
+          removeQuery: args[7] ? JSON.parse(args[7]) : undefined,
+          body: args[8],
+        };
+        const rule = await proxy.addRequestTransform(input);
+        console.log(JSON.stringify({ status: "added", rule }, null, 2));
+      } else if (sub === "list") {
+        console.log(JSON.stringify(proxy.listRequestTransforms(), null, 2));
+      } else {
+        console.error("Usage: req-transform add <method> <url> [setHeaders] [removeHeaders] [setQuery] [removeQuery] [body] | list");
+      }
+      break;
+    }
     case "traffic": {
       const filter = args[1];
       console.log(JSON.stringify(proxy.listTraffic(filter), null, 2));
@@ -181,6 +202,9 @@ ca:import     Extract CA from Charles .p12
   transform     Manage transform rules
     add <method> <url> <patches.json>   Add a transform
     list                                List transforms
+  req-transform Manage request-modification rules
+    add <method> <url> [setHeadersJSON] [removeHeadersJSON] [setQueryJSON] [removeQueryJSON] [body]   Add a request transform
+    list                                List request transforms
   traffic [filter]                      View captured traffic
   mock          Manage mock rules
     add <method> <url> [bodyFile]       Add a mock

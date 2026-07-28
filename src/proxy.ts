@@ -68,6 +68,30 @@ export interface TransformRule {
   createdAt: string;
 }
 
+export interface RequestTransformInput {
+  method: string;
+  url: string;
+  regex?: boolean;
+  setHeaders?: Record<string, string>;
+  removeHeaders?: string[];
+  setQuery?: Record<string, string>;
+  removeQuery?: string[];
+  body?: string;
+}
+
+export interface RequestTransformRule {
+  id: string;
+  method: Method;
+  url: string;
+  regex: boolean;
+  setHeaders?: Record<string, string>;
+  removeHeaders?: string[];
+  setQuery?: Record<string, string>;
+  removeQuery?: string[];
+  body?: string;
+  createdAt: string;
+}
+
 interface TrafficEntry {
   id: string;
   method: string;
@@ -85,6 +109,8 @@ interface TrafficEntry {
   patchesApplied?: number;
   /** Truncated response body (first 500 chars) sampled after transform. */
   responseBodyPreview?: string;
+  /** Truncated request body (first 500 chars) for POST/PUT inspection. */
+  requestBodyPreview?: string;
 }
 
 /** Convert a user URL pattern into a RegExp used by mockttp's path/url matcher. */
@@ -347,6 +373,8 @@ export class ProxyManager {
   private rules = new Map<string, { rule: MockRule; body?: string }>();
   /** Transform rules that intercept, forward, and modify JSON responses. */
   private transforms = new Map<string, TransformRule>();
+  /** Request transform rules that modify outgoing requests before forwarding. */
+  private requestTransforms = new Map<string, RequestTransformRule>();
   /** mockttp endpoint id -> our rule id (for translating matchedRuleId). */
   private endpointToRule = new Map<string, string>();
   private traffic = new Map<string, TrafficEntry>();
@@ -373,6 +401,7 @@ export class ProxyManager {
     port?: number;
     mockRules: number;
     transformRules: number;
+    requestTransformRules: number;
     trafficCaptured: number;
     lastRequestAt?: string;
     lastError?: string;
@@ -390,6 +419,7 @@ export class ProxyManager {
       port: this.actualPort,
       mockRules: this.rules.size,
       transformRules: this.transforms.size,
+      requestTransformRules: this.requestTransforms.size,
       trafficCaptured: this.traffic.size,
       lastRequestAt: this.lastRequestAt,
       lastError: this.lastError,
@@ -436,8 +466,11 @@ export class ProxyManager {
       const defaultPath = opts.restoreTransforms || resolve("transforms.json");
       try {
         await access(defaultPath);
-        const data: TransformRuleInput[] = JSON.parse(await readFile(defaultPath, "utf8"));
-        for (const input of data) {
+        const raw = JSON.parse(await readFile(defaultPath, "utf8"));
+        const data = Array.isArray(raw) ? raw : (raw as Record<string, unknown>);
+        // Load response transforms
+        const responseData: TransformRuleInput[] = Array.isArray(data) ? data : (data as Record<string, unknown>).responseTransforms as TransformRuleInput[] ?? [];
+        for (const input of responseData) {
           const method = input.method.toUpperCase() as Method;
           const existing = [...this.transforms.values()].find(
             (r) => r.method === method && r.url === input.url && r.regex === (input.regex ?? false),
@@ -455,6 +488,36 @@ export class ProxyManager {
             });
           }
         }
+        // Load request transforms
+        if (!Array.isArray(data)) {
+          const reqData: RequestTransformInput[] = (data as Record<string, unknown>).requestTransforms as RequestTransformInput[] ?? [];
+          for (const input of reqData) {
+            const method = input.method.toUpperCase() as Method;
+            const existing = [...this.requestTransforms.values()].find(
+              (r) => r.method === method && r.url === input.url && r.regex === (input.regex ?? false),
+            );
+            if (existing) {
+              existing.setHeaders = input.setHeaders;
+              existing.removeHeaders = input.removeHeaders;
+              existing.setQuery = input.setQuery;
+              existing.removeQuery = input.removeQuery;
+              existing.body = input.body;
+            } else {
+              this.requestTransforms.set(randomUUID(), {
+                id: randomUUID(),
+                method,
+                url: input.url,
+                regex: input.regex ?? false,
+                setHeaders: input.setHeaders,
+                removeHeaders: input.removeHeaders,
+                setQuery: input.setQuery,
+                removeQuery: input.removeQuery,
+                body: input.body,
+                createdAt: new Date().toISOString(),
+              });
+            }
+          }
+        }
         await this.applyRules();
       } catch {
         // File missing or invalid — ignore.
@@ -465,8 +528,10 @@ export class ProxyManager {
     if (opts.restoreTransforms && opts.restoreTransforms.length > 0 && opts.restoreTransforms !== resolve("transforms.json")) {
       try {
         const loadedPath = resolve(opts.restoreTransforms);
-        const data: TransformRuleInput[] = JSON.parse(await readFile(loadedPath, "utf8"));
-        for (const input of data) {
+        const raw = JSON.parse(await readFile(loadedPath, "utf8"));
+        const data = Array.isArray(raw) ? raw : (raw as Record<string, unknown>);
+        const responseData: TransformRuleInput[] = Array.isArray(data) ? data : (data as Record<string, unknown>).responseTransforms as TransformRuleInput[] ?? [];
+        for (const input of responseData) {
           const method = input.method.toUpperCase() as Method;
           const existing = [...this.transforms.values()].find(
             (r) => r.method === method && r.url === input.url && r.regex === (input.regex ?? false),
@@ -482,6 +547,35 @@ export class ProxyManager {
               patches: input.patches,
               createdAt: new Date().toISOString(),
             });
+          }
+        }
+        if (!Array.isArray(data)) {
+          const reqData: RequestTransformInput[] = (data as Record<string, unknown>).requestTransforms as RequestTransformInput[] ?? [];
+          for (const input of reqData) {
+            const method = input.method.toUpperCase() as Method;
+            const existing = [...this.requestTransforms.values()].find(
+              (r) => r.method === method && r.url === input.url && r.regex === (input.regex ?? false),
+            );
+            if (existing) {
+              existing.setHeaders = input.setHeaders;
+              existing.removeHeaders = input.removeHeaders;
+              existing.setQuery = input.setQuery;
+              existing.removeQuery = input.removeQuery;
+              existing.body = input.body;
+            } else {
+              this.requestTransforms.set(randomUUID(), {
+                id: randomUUID(),
+                method,
+                url: input.url,
+                regex: input.regex ?? false,
+                setHeaders: input.setHeaders,
+                removeHeaders: input.removeHeaders,
+                setQuery: input.setQuery,
+                removeQuery: input.removeQuery,
+                body: input.body,
+                createdAt: new Date().toISOString(),
+              });
+            }
           }
         }
         await this.applyRules();
@@ -516,16 +610,31 @@ export class ProxyManager {
 
     // Save transforms before clearing so they can be restored on next start.
     let savedTransformsPath: string | undefined;
-    if (this.transforms.size > 0) {
+    if (this.transforms.size > 0 || this.requestTransforms.size > 0) {
       try {
         savedTransformsPath = resolve("transforms.json");
-        const data = [...this.transforms.values()].map((r) => ({
-          method: r.method,
-          url: r.url,
-          regex: r.regex,
-          patches: r.patches,
-        }));
-        await writeFile(savedTransformsPath, JSON.stringify(data, null, 2));
+        const payload: Record<string, unknown> = {};
+        if (this.transforms.size > 0) {
+          payload.responseTransforms = [...this.transforms.values()].map((r) => ({
+            method: r.method,
+            url: r.url,
+            regex: r.regex,
+            patches: r.patches,
+          }));
+        }
+        if (this.requestTransforms.size > 0) {
+          payload.requestTransforms = [...this.requestTransforms.values()].map((r) => ({
+            method: r.method,
+            url: r.url,
+            regex: r.regex,
+            setHeaders: r.setHeaders,
+            removeHeaders: r.removeHeaders,
+            setQuery: r.setQuery,
+            removeQuery: r.removeQuery,
+            body: r.body,
+          }));
+        }
+        await writeFile(savedTransformsPath, JSON.stringify(payload, null, 2));
       } catch {
         // Non-fatal.
       }
@@ -533,6 +642,7 @@ export class ProxyManager {
 
     this.rules.clear();
     this.transforms.clear();
+    this.requestTransforms.clear();
     this.endpointToRule.clear();
     this.traffic.clear();
     this.trafficOrder = [];
@@ -700,42 +810,148 @@ export class ProxyManager {
     return this.addTransform(input);
   }
 
+  async addRequestTransform(input: RequestTransformInput): Promise<RequestTransformRule> {
+    if (!this.server) {
+      throw new Error("Proxy is not running. Call proxy_start first.");
+    }
+    const method = input.method.toUpperCase() as Method;
+    if (!SUPPORTED_METHODS.includes(method)) {
+      throw new Error(
+        `Unsupported method '${input.method}'. Supported: ${SUPPORTED_METHODS.join(", ")}.`,
+      );
+    }
+    const rule: RequestTransformRule = {
+      id: randomUUID(),
+      method,
+      url: input.url,
+      regex: input.regex ?? false,
+      setHeaders: input.setHeaders,
+      removeHeaders: input.removeHeaders,
+      setQuery: input.setQuery,
+      removeQuery: input.removeQuery,
+      body: input.body,
+      createdAt: new Date().toISOString(),
+    };
+    this.requestTransforms.set(rule.id, rule);
+    await this.applyRules();
+    return rule;
+  }
+
+  listRequestTransforms(): RequestTransformRule[] {
+    return [...this.requestTransforms.values()];
+  }
+
+  async clearRequestTransforms(id?: string): Promise<number> {
+    if (!this.server) throw new Error("Proxy is not running.");
+    let removed: number;
+    if (id) {
+      removed = this.requestTransforms.delete(id) ? 1 : 0;
+      if (removed === 0) throw new Error(`No request transform rule with id '${id}'.`);
+    } else {
+      removed = this.requestTransforms.size;
+      this.requestTransforms.clear();
+    }
+    await this.applyRules();
+    return removed;
+  }
+
+  async updateRequestTransform(input: RequestTransformInput): Promise<RequestTransformRule> {
+    if (!this.server) {
+      throw new Error("Proxy is not running. Call proxy_start first.");
+    }
+    const method = input.method.toUpperCase() as Method;
+    if (!SUPPORTED_METHODS.includes(method)) {
+      throw new Error(
+        `Unsupported method '${input.method}'. Supported: ${SUPPORTED_METHODS.join(", ")}.`,
+      );
+    }
+    const existing = [...this.requestTransforms.values()].find(
+      (r) => r.method === method && r.url === input.url && r.regex === (input.regex ?? false),
+    );
+    if (existing) {
+      existing.setHeaders = input.setHeaders;
+      existing.removeHeaders = input.removeHeaders;
+      existing.setQuery = input.setQuery;
+      existing.removeQuery = input.removeQuery;
+      existing.body = input.body;
+      await this.applyRules();
+      return existing;
+    }
+    return this.addRequestTransform(input);
+  }
+
   /** Serialize all transform rules to a JSON file. */
   async saveTransformsToFile(filePath: string): Promise<string> {
     const path = resolve(filePath);
-    const data = [...this.transforms.values()].map((r) => ({
-      method: r.method,
-      url: r.url,
-      regex: r.regex,
-      patches: r.patches,
-    }));
-    await writeFile(path, JSON.stringify(data, null, 2));
+    const payload: Record<string, unknown> = {};
+    if (this.transforms.size > 0) {
+      payload.responseTransforms = [...this.transforms.values()].map((r) => ({
+        method: r.method,
+        url: r.url,
+        regex: r.regex,
+        patches: r.patches,
+      }));
+    }
+    if (this.requestTransforms.size > 0) {
+      payload.requestTransforms = [...this.requestTransforms.values()].map((r) => ({
+        method: r.method,
+        url: r.url,
+        regex: r.regex,
+        setHeaders: r.setHeaders,
+        removeHeaders: r.removeHeaders,
+        setQuery: r.setQuery,
+        removeQuery: r.removeQuery,
+        body: r.body,
+      }));
+    }
+    await writeFile(path, JSON.stringify(payload, null, 2));
     return path;
   }
 
   /** Load transform rules from a JSON file and apply them. */
-  async loadTransformsFromFile(filePath: string): Promise<TransformRule[]> {
+  async loadTransformsFromFile(filePath: string): Promise<{ responseTransforms: TransformRule[]; requestTransforms: RequestTransformRule[] }> {
     const path = resolve(filePath);
-    const data: TransformRuleInput[] = JSON.parse(await readFile(path, "utf8"));
-    const results: TransformRule[] = [];
-    for (const input of data) {
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    const data = Array.isArray(raw) ? raw : (raw as Record<string, unknown>);
+    const responseResults: TransformRule[] = [];
+    const requestResults: RequestTransformRule[] = [];
+
+    const responseInputs: TransformRuleInput[] = Array.isArray(data) ? data : (data as Record<string, unknown>).responseTransforms as TransformRuleInput[] ?? [];
+    for (const input of responseInputs) {
       const rule = await this.updateTransform(input);
-      results.push(rule);
+      responseResults.push(rule);
     }
-    return results;
+
+    if (!Array.isArray(data)) {
+      const requestInputs: RequestTransformInput[] = (data as Record<string, unknown>).requestTransforms as RequestTransformInput[] ?? [];
+      for (const input of requestInputs) {
+        const rule = await this.updateRequestTransform(input);
+        requestResults.push(rule);
+      }
+    }
+
+    return { responseTransforms: responseResults, requestTransforms: requestResults };
   }
 
-  listTraffic(filter?: string): TrafficEntry[] {
+  listTraffic(filter?: string, opts?: { includeBodies?: boolean }): TrafficEntry[] {
     const entries = this.trafficOrder
       .map((id) => this.traffic.get(id))
       .filter((e): e is TrafficEntry => e !== undefined);
-    if (!filter) return entries;
-    const needle = filter.toLowerCase();
-    return entries.filter(
-      (e) =>
-        e.url.toLowerCase().includes(needle) ||
-        e.method.toLowerCase().includes(needle),
-    );
+    const needle = filter?.toLowerCase();
+    const filtered = needle
+      ? entries.filter(
+          (e) =>
+            e.url.toLowerCase().includes(needle) ||
+            e.method.toLowerCase().includes(needle),
+        )
+      : entries;
+    if (!opts?.includeBodies) {
+      return filtered.map((e) => {
+        const { requestBodyPreview: _rb, ...rest } = e;
+        return rest as TrafficEntry;
+      });
+    }
+    return filtered;
   }
 
   async exportTraffic(format: "json" | "har", filter?: string): Promise<string> {
@@ -815,6 +1031,15 @@ export class ProxyManager {
         return this.handleTransform(tf, req);
       });
       this.endpointToRule.set(endpoint.id, tfId);
+    }
+
+    // 2a. Request transform rules (intercept -> modify request -> forward -> return)
+    for (const [rtId, rt] of this.requestTransforms) {
+      const builder = this.builderForMethod(server, rt.method, rt);
+      const endpoint = await builder.thenCallback(async (req) => {
+        return this.handleRequestTransform(rt, req);
+      });
+      this.endpointToRule.set(endpoint.id, rtId);
     }
 
     // 2b. Metro / dev-server HTTP passthrough (plain http:// — tlsPassthrough is HTTPS-only).
@@ -989,6 +1214,91 @@ export class ProxyManager {
     }
   }
 
+  /** Handle a request transform rule: modify outgoing request, forward, return response. */
+  private async handleRequestTransform(
+    rt: RequestTransformRule,
+    req: CompletedRequest,
+  ): Promise<{ status: number; body?: string; headers?: Record<string, string> }> {
+    try {
+      const r = req as unknown as {
+        id: string;
+        method: string;
+        url: string;
+        headers: Record<string, string | string[]>;
+        body: { buffer: Buffer };
+      };
+
+      // 1. Build forward headers: strip proxy headers + removeHeaders, apply setHeaders.
+      const forwardHeaders: Record<string, string> = {};
+      const skipHeaders = new Set([...PASSTHROUGH_SKIP_HEADERS, "accept-encoding"]);
+      const removeLower = new Set((rt.removeHeaders ?? []).map((h) => h.toLowerCase()));
+      for (const [key, value] of Object.entries(r.headers)) {
+        const lk = key.toLowerCase();
+        if (!skipHeaders.has(lk) && !removeLower.has(lk)) {
+          forwardHeaders[key] = Array.isArray(value) ? value.join(", ") : value;
+        }
+      }
+      if (rt.setHeaders) {
+        for (const [key, value] of Object.entries(rt.setHeaders)) {
+          forwardHeaders[key] = value;
+        }
+      }
+
+      // 2. Modify query parameters.
+      let forwardUrl = r.url;
+      if (rt.setQuery || (rt.removeQuery && rt.removeQuery.length > 0)) {
+        const parsed = new URL(r.url);
+        const params = new URLSearchParams(parsed.search);
+        if (rt.removeQuery) {
+          for (const key of rt.removeQuery) {
+            params.delete(key);
+          }
+        }
+        if (rt.setQuery) {
+          for (const [key, value] of Object.entries(rt.setQuery)) {
+            params.set(key, value);
+          }
+        }
+        const qs = params.toString();
+        parsed.search = qs ? `?${qs}` : "";
+        forwardUrl = parsed.toString();
+      }
+
+      // 3. Forward to real backend with modified request.
+      const upstream = await fetch(forwardUrl, {
+        method: r.method,
+        headers: forwardHeaders,
+        body: rt.body !== undefined
+          ? rt.body
+          : ["GET", "HEAD"].includes(r.method)
+            ? undefined
+            : r.body.buffer,
+      });
+
+      const bodyText = await upstream.text();
+      const responseHeaders: Record<string, string> = {};
+      upstream.headers.forEach((value, key) => {
+        if (!PASSTHROUGH_SKIP_HEADERS.has(key.toLowerCase())) {
+          responseHeaders[key] = value;
+        }
+      });
+
+      return {
+        status: upstream.status,
+        body: bodyText,
+        headers: responseHeaders,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.lastError = `Request transform error: ${msg}`;
+      return {
+        status: 502,
+        body: JSON.stringify({ error: `shah-proxy request transform error: ${msg}` }),
+        headers: { "content-type": "application/json" },
+      };
+    }
+  }
+
   /** Walk the JSON tree and apply each patch where conditions match. Returns total patches applied. */
   private applyPatches(obj: unknown, patches: JsonPatch[]): number {
     let total = 0;
@@ -1035,6 +1345,10 @@ export class ProxyManager {
       this.lastRequestAt = new Date().toISOString();
       const tf = this.transformOutcomes.get(req.id);
       const bodyPreview = this.bodyPreviews.get(req.id);
+      const body = req.body as unknown as Buffer | undefined;
+      const requestBodyPreview = body && body.length > 0
+        ? body.toString("utf8").slice(0, 500)
+        : undefined;
       this.upsert(req.id, {
         id: req.id,
         method: req.method,
@@ -1047,6 +1361,7 @@ export class ProxyManager {
         transformOutcome: tf?.outcome,
         patchesApplied: tf?.count,
         responseBodyPreview: bodyPreview,
+        requestBodyPreview,
       });
     });
     await server.on("response", (res) => {
