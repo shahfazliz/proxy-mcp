@@ -106,24 +106,33 @@ async function main() {
     case "ca:import": {
       const p12Idx = args.indexOf("--p12");
       const passwordIdx = args.indexOf("--password");
-      const password = (passwordIdx !== -1 && args[passwordIdx + 1]) ? args[passwordIdx + 1] : "";
+      const legacy = (passwordIdx !== -1 && args[passwordIdx + 1]) ? args[passwordIdx + 1] : undefined;
       if (p12Idx === -1 || !args[p12Idx + 1]) {
         console.error("Usage: ca:import --p12 /path/to/charles-ssl-proxying.p12 [--password yourpassword]");
+        console.error("Prefer SHAH_PROXY_CA_PASSWORD env var so the password is not visible in `ps`.");
         process.exit(1);
       }
       const p12Path = args[p12Idx + 1];
+      const password = process.env.SHAH_PROXY_CA_PASSWORD ?? legacy ?? "";
+      // Pass the password to openssl via its environment, never via argv, so it
+      // does not appear in the process list.
+      const opensslEnv = { ...process.env, SHAH_PROXY_CA_PASSWORD: password };
       const caDir = getCaDir();
       await mkdir(caDir, { recursive: true });
-      await execFileAsync("openssl", [
-        "pkcs12", "-in", p12Path, "-nocerts", "-nodes",
-        "-passin", `pass:${password}`,
-        "-out", getCaKeyPath(),
-      ]);
-      await execFileAsync("openssl", [
-        "pkcs12", "-in", p12Path, "-clcerts", "-nokeys",
-        "-passin", `pass:${password}`,
-        "-out", getCaCertPath(),
-      ]);
+      await execFileAsync(
+        "openssl",
+        ["pkcs12", "-in", p12Path, "-nocerts", "-nodes",
+          "-passin", "env:SHAH_PROXY_CA_PASSWORD",
+          "-out", getCaKeyPath()],
+        { env: opensslEnv },
+      );
+      await execFileAsync(
+        "openssl",
+        ["pkcs12", "-in", p12Path, "-clcerts", "-nokeys",
+          "-passin", "env:SHAH_PROXY_CA_PASSWORD",
+          "-out", getCaCertPath()],
+        { env: opensslEnv },
+      );
       console.log(`CA imported:\n  dir: ${caDir}\n  cert: ${getCaCertPath()}\n  key:  ${getCaKeyPath()}`);
       break;
     }
@@ -218,7 +227,8 @@ Commands:
   ca:status     CA fingerprint and path status
 ca:import     Extract CA from Charles .p12
       --p12 <path>        Path to charles-ssl-proxying.p12
-      --password <pw>     Password for .p12 (optional, default: empty)
+      --password <pw>     Password for .p12 (optional, default: empty).
+                          Prefer env var SHAH_PROXY_CA_PASSWORD so it is not visible in 'ps'.
   transform     Manage transform rules
     add <method> <url> <patches.json>   Add a transform
     list                                List transforms
