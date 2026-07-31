@@ -141,6 +141,14 @@ npx proxy-mcp-cli transform add GET "https://..." patches.json
 npx proxy-mcp-cli traffic --filter example
 ```
 
+## Allowed directories
+
+File-access tools (`bodyFile` on mocks, `proxy_save_transforms`, `proxy_load_transforms`, and CLI patch files) only read/write inside the folder the proxy was launched from. Add other directories at launch with a repeatable `--allowed-dir <path>` flag or the `SHAH_PROXY_ALLOWED_DIRS` env var (comma-separated). The list is fixed at startup — tools cannot widen it at runtime.
+
+```bash
+npx proxy-mcp-cli --allowed-dir /Users/me/shared-fixtures start
+```
+
 ## Metro passthrough
 
 The proxy automatically forwards Metro bundler requests (`:8081`) to the local dev server. Headers like `newrelic`, `traceparent`, `tracestate`, and `accept-encoding` are stripped from forwarded Metro requests to avoid breaking the bundler.

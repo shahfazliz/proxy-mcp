@@ -15,7 +15,7 @@
  *   npm run cli -- traffic
  */
 
-import { proxy, ProxyManager, DEFAULT_PORT, type TransformRuleInput, type MockRuleInput, type RequestTransformInput } from "./proxy.js";
+import { proxy, ProxyManager, DEFAULT_PORT, resolveAllowedPath, type TransformRuleInput, type MockRuleInput, type RequestTransformInput } from "./proxy.js";
 import { getCaCertPath, getCaKeyPath, getCaDir, setCaDir, ensureCA, sha256Fingerprint } from "./ca.js";
 import { getLanIp } from "./net.js";
 import { readFile } from "node:fs/promises";
@@ -34,6 +34,24 @@ if (caDirIdx !== -1 && process.argv[caDirIdx + 1]) {
   // Remove from args so they don't confuse subcommand parsers
   process.argv.splice(caDirIdx, 2);
 }
+
+const allowedDirs: string[] = [];
+{
+  let i = process.argv.length;
+  while (i-- > 0) {
+    if (process.argv[i] === "--allowed-dir" && process.argv[i + 1]) {
+      allowedDirs.push(process.argv[i + 1]);
+      process.argv.splice(i, 2);
+    }
+  }
+}
+allowedDirs.push(
+  ...(process.env.SHAH_PROXY_ALLOWED_DIRS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+proxy.setAllowedDirs(allowedDirs);
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -112,10 +130,11 @@ async function main() {
     case "transform": {
       const sub = args[1];
       if (sub === "add" && args[2] && args[3] && args[4]) {
+        const patchPath = await resolveAllowedPath(args[4], allowedDirs);
         const input: TransformRuleInput = {
           method: args[2],
           url: args[3],
-          patches: JSON.parse(await readFile(args[4], "utf8")),
+          patches: JSON.parse(await readFile(patchPath, "utf8")),
         };
         const rule = await proxy.addTransform(input);
         console.log(JSON.stringify({ status: "added", rule }, null, 2));
@@ -174,7 +193,8 @@ async function main() {
       const probeUrl = args[1];
       const probeFile = args[2];
       if (probeUrl && probeFile) {
-        const patches = JSON.parse(await readFile(probeFile, "utf8"));
+        const patchPath = await resolveAllowedPath(probeFile, allowedDirs);
+        const patches = JSON.parse(await readFile(patchPath, "utf8"));
         const result = await ProxyManager.probeTransform(probeUrl, patches);
         console.log(JSON.stringify(result, null, 2));
       } else {
@@ -213,6 +233,9 @@ ca:import     Extract CA from Charles .p12
 
 Global options (before subcommand):
   --ca-dir <path>       CA certificate directory (default: CWD/.proxy-ca/)
+  --allowed-dir <path>  Extra directory for bodyFile / save-load / patch files
+                        (repeatable). Default: only the launch directory is allowed.
+                        Env: SHAH_PROXY_ALLOWED_DIRS (comma-separated).
 `);
     }
   }

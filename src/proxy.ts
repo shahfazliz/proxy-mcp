@@ -1,6 +1,6 @@
 import { getLocal, type Mockttp, type RequestRuleBuilder, type CompletedRequest } from "mockttp";
-import { readFile, writeFile, access } from "node:fs/promises";
-import { resolve } from "node:path";
+import { readFile, writeFile, access, realpath } from "node:fs/promises";
+import { resolve, sep, dirname, basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { ensureCA } from "./ca.js";
 import { getLanIp, isPortFree, whoIsOnPort } from "./net.js";
@@ -181,6 +181,48 @@ const SENSITIVE_HEADER_NAMES = new Set([
 ]);
 
 const REDACTED_HEADER = "[REDACTED]";
+
+/** Deepest existing ancestor of `path`, realpath'd (resolves symlinked dirs). */
+async function realResolve(path: string): Promise<string> {
+  let current = path;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = await realpath(current);
+      return tail.length > 0 ? join(real, ...tail.reverse()) : real;
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return path;
+      tail.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+/**
+ * Resolve a user-supplied path and enforce it stays inside `allowedDirs`.
+ * The launch directory (process.cwd()) is always allowed; `allowedDirs` adds more.
+ */
+export async function resolveAllowedPath(
+  filePath: string,
+  allowedDirs: string[],
+): Promise<string> {
+  const abs = resolve(filePath);
+  const dirs = [...new Set([resolve("."), ...allowedDirs])];
+  const candidates = await Promise.all(dirs.map((d) => realResolve(resolve(d))));
+  const target = await realResolve(abs);
+  const within = candidates.some(
+    (d) => target === d || target.startsWith(d + sep),
+  );
+  if (!within) {
+    throw new Error(
+      `Path is outside the proxy's allowed directories: ${abs}\n` +
+        `Allowed: ${dirs.join(", ")}\n` +
+        `Add the directory with --allowed-dir <path> (or SHAH_PROXY_ALLOWED_DIRS) to permit it.`,
+    );
+  }
+  return abs;
+}
 
 function redactHeaders(headers: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -402,6 +444,8 @@ export class ProxyManager {
   private server: Mockttp | undefined;
   private actualPort: number | undefined;
   private passthroughHosts: string[] = [];
+  /** Directories that user-supplied file paths (bodyFile, save/load) may touch. Empty = launch dir only. */
+  private allowedDirs: string[] = [];
   /** Live rule store; the resolved body is held alongside for re-applying. */
   private rules = new Map<string, { rule: MockRule; body?: string }>();
   /** Transform rules that intercept, forward, and modify JSON responses. */
@@ -423,6 +467,16 @@ export class ProxyManager {
 
   isRunning(): boolean {
     return this.server !== undefined;
+  }
+
+  /** Set allowed directories for file-access tools. Only settable at startup (CLI/env), not via MCP tools. */
+  setAllowedDirs(dirs: string[]): void {
+    this.allowedDirs = dirs.map((d) => resolve(d)).filter((d) => d.length > 0);
+  }
+
+  /** Resolve a user-supplied path, enforcing the allowlist. Throws when outside. */
+  private async assertAllowedPath(filePath: string): Promise<string> {
+    return resolveAllowedPath(filePath, this.allowedDirs);
   }
 
   get port(): number | undefined {
@@ -560,7 +614,7 @@ export class ProxyManager {
     // Backward compat: explicit path overrides defaults (still checked above).
     if (opts.restoreTransforms && opts.restoreTransforms.length > 0 && opts.restoreTransforms !== resolve("transforms.json")) {
       try {
-        const loadedPath = resolve(opts.restoreTransforms);
+        const loadedPath = await this.assertAllowedPath(opts.restoreTransforms);
         const raw = JSON.parse(await readFile(loadedPath, "utf8"));
         const data = Array.isArray(raw) ? raw : (raw as Record<string, unknown>);
         const responseData: TransformRuleInput[] = Array.isArray(data) ? data : (data as Record<string, unknown>).responseTransforms as TransformRuleInput[] ?? [];
@@ -706,7 +760,7 @@ export class ProxyManager {
     let body: string | undefined;
     let bodySource: MockRule["bodySource"] = "none";
     if (input.bodyFile !== undefined) {
-      const path = resolve(input.bodyFile);
+      const path = await this.assertAllowedPath(input.bodyFile);
       body = await readFile(path, "utf8");
       bodySource = "file";
     } else if (input.body !== undefined) {
@@ -915,7 +969,7 @@ export class ProxyManager {
 
   /** Serialize all transform rules to a JSON file. */
   async saveTransformsToFile(filePath: string): Promise<string> {
-    const path = resolve(filePath);
+    const path = await this.assertAllowedPath(filePath);
     const payload: Record<string, unknown> = {};
     if (this.transforms.size > 0) {
       payload.responseTransforms = [...this.transforms.values()].map((r) => ({
@@ -943,7 +997,7 @@ export class ProxyManager {
 
   /** Load transform rules from a JSON file and apply them. */
   async loadTransformsFromFile(filePath: string): Promise<{ responseTransforms: TransformRule[]; requestTransforms: RequestTransformRule[] }> {
-    const path = resolve(filePath);
+    const path = await this.assertAllowedPath(filePath);
     const raw = JSON.parse(await readFile(path, "utf8"));
     const data = Array.isArray(raw) ? raw : (raw as Record<string, unknown>);
     const responseResults: TransformRule[] = [];

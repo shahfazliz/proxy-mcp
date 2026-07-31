@@ -116,7 +116,7 @@ server.registerTool(
       bodyFile: z
         .string()
         .optional()
-        .describe("Path to a fixture file whose contents become the response body (large payloads)."),
+        .describe("Path to a fixture file whose contents become the response body (large payloads). Must be inside the proxy's allowed directories (default: the folder the proxy was launched from). Add --allowed-dir <path> at launch to permit others."),
     },
   },
   async (args) => {
@@ -513,7 +513,7 @@ server.registerTool(
       path: z
         .string()
         .optional()
-        .describe("File path to save to (default: transforms.json in project root)."),
+        .describe("File path to save to (default: transforms.json in project root). Must be inside the proxy's allowed directories (default: the folder the proxy was launched from); extend with --allowed-dir <path>."),
     },
   },
   async ({ path }) => {
@@ -558,7 +558,7 @@ server.registerTool(
       path: z
         .string()
         .optional()
-        .describe("File path to load from (default: transforms.json in project root)."),
+        .describe("File path to load from (default: transforms.json in project root). Must be inside the proxy's allowed directories (default: the folder the proxy was launched from); extend with --allowed-dir <path>."),
     },
   },
   async ({ path }) => {
@@ -577,6 +577,20 @@ export async function main(): Promise<void> {
   if (caDirIdx !== -1 && process.argv[caDirIdx + 1]) {
     setCaDir(process.argv[caDirIdx + 1]);
   }
+  const allowedDirs: string[] = [];
+  let i = process.argv.length;
+  while (i-- > 0) {
+    if (process.argv[i] === "--allowed-dir" && process.argv[i + 1]) {
+      allowedDirs.push(process.argv[i + 1]);
+    }
+  }
+  allowedDirs.push(
+    ...(process.env.SHAH_PROXY_ALLOWED_DIRS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  proxy.setAllowedDirs(allowedDirs);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("shah-proxy-mcp running on stdio");
