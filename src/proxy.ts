@@ -159,6 +159,39 @@ const PASSTHROUGH_SKIP_HEADERS = new Set([
   "trailer",
 ]);
 
+/** Headers whose values are redacted from captured traffic and exports by default. */
+const SENSITIVE_HEADER_NAMES = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "api-key",
+  "apikey",
+  "x-auth-token",
+  "x-access-token",
+  "x-amz-security-token",
+  "x-amz-credential",
+  "x-ms-token",
+  "x-ms-accesstoken",
+  "x-csrf-token",
+  "csrf-token",
+  "newrelic",
+  "x-newrelic-id",
+]);
+
+const REDACTED_HEADER = "[REDACTED]";
+
+function redactHeaders(headers: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    result[key] = SENSITIVE_HEADER_NAMES.has(key.toLowerCase())
+      ? REDACTED_HEADER
+      : value;
+  }
+  return result;
+}
+
 /** Do not forward app telemetry or compression headers to Metro. */
 const METRO_FORWARD_SKIP_HEADERS = new Set([
   ...PASSTHROUGH_SKIP_HEADERS,
@@ -933,7 +966,10 @@ export class ProxyManager {
     return { responseTransforms: responseResults, requestTransforms: requestResults };
   }
 
-  listTraffic(filter?: string, opts?: { includeBodies?: boolean }): TrafficEntry[] {
+  listTraffic(
+    filter?: string,
+    opts?: { includeBodies?: boolean; includeSensitiveHeaders?: boolean },
+  ): TrafficEntry[] {
     const entries = this.trafficOrder
       .map((id) => this.traffic.get(id))
       .filter((e): e is TrafficEntry => e !== undefined);
@@ -945,17 +981,30 @@ export class ProxyManager {
             e.method.toLowerCase().includes(needle),
         )
       : entries;
-    if (!opts?.includeBodies) {
-      return filtered.map((e) => {
-        const { requestBodyPreview: _rb, ...rest } = e;
-        return rest as TrafficEntry;
-      });
-    }
-    return filtered;
+    return filtered.map((e) => {
+      const entry: TrafficEntry = { ...e };
+      if (!opts?.includeSensitiveHeaders) {
+        entry.requestHeaders = redactHeaders(entry.requestHeaders);
+        if (entry.responseHeaders) {
+          entry.responseHeaders = redactHeaders(entry.responseHeaders);
+        }
+      }
+      if (!opts?.includeBodies) {
+        delete entry.requestBodyPreview;
+        delete entry.responseBodyPreview;
+      }
+      return entry;
+    });
   }
 
-  async exportTraffic(format: "json" | "har", filter?: string): Promise<string> {
-    const entries = this.listTraffic(filter);
+  async exportTraffic(
+    format: "json" | "har",
+    filter?: string,
+    opts?: { includeSensitiveHeaders?: boolean },
+  ): Promise<string> {
+    const entries = this.listTraffic(filter, {
+      includeSensitiveHeaders: opts?.includeSensitiveHeaders,
+    });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     if (format === "json") {
       const path = resolve(`traffic-${stamp}.json`);

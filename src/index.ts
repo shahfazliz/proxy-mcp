@@ -341,6 +341,7 @@ server.registerTool(
     title: "List / export captured traffic",
     description:
       "Confirm a rule matched the intended request by inspecting captured traffic. Each entry includes transformOutcome (patched|no_match|not_json|error) and patchesApplied count. " +
+      "Sensitive headers (authorization, cookies, api keys) are redacted by default — set includeSensitiveHeaders=true to see raw values. " +
       "Use includeRequestBodyPreviews=true to see POST/PUT body content. Use includeResponseBodyPreviews=true for response samples. " +
       "Optionally export to JSON or HAR (replaces the Charles log-export workflow).",
     inputSchema: {
@@ -352,14 +353,21 @@ server.registerTool(
       includeBodies: z.boolean().optional().describe("Include response body previews (default false). Deprecated: use includeResponseBodyPreviews."),
       includeRequestBodyPreviews: z.boolean().optional().describe("Include request body previews (default false)."),
       includeResponseBodyPreviews: z.boolean().optional().describe("Include response body previews (default false)."),
+      includeSensitiveHeaders: z
+        .boolean()
+        .optional()
+        .describe("Include raw sensitive headers (authorization, cookies, api keys) in the output. Default false — values are redacted as [REDACTED]."),
     },
   },
-  async ({ filter, export: exportFormat, includeBodies, includeRequestBodyPreviews, includeResponseBodyPreviews }) => {
+  async ({ filter, export: exportFormat, includeBodies, includeRequestBodyPreviews, includeResponseBodyPreviews, includeSensitiveHeaders }) => {
     try {
       const showBodies = includeRequestBodyPreviews || includeResponseBodyPreviews || includeBodies;
-      const entries = proxy.listTraffic(filter, { includeBodies: showBodies });
+      const entries = proxy.listTraffic(filter, {
+        includeBodies: showBodies,
+        includeSensitiveHeaders,
+      });
       if (exportFormat) {
-        const path = await proxy.exportTraffic(exportFormat, filter);
+        const path = await proxy.exportTraffic(exportFormat, filter, { includeSensitiveHeaders });
         return text({ count: entries.length, exported: path, hint: "Use includeBodies=true for body previews." });
       }
       // Inline: include body previews only if explicitly requested.
