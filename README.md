@@ -4,10 +4,12 @@
 
 - Intercepts HTTP/HTTPS traffic from physical devices and emulators
 - Registers mock responses and JSON transform rules via MCP tools
+- Modifies outgoing requests (headers / query / body) via request-transform rules
 - Probes transforms before registering (one-shot dry-run patch)
 - Persists/restores transform rules across proxy restarts
 - Tracks per-request transform outcomes — distinguish patched, no_match, error
 - Gzip-safe — transparently decompresses, patches, and recompresses
+- Rewrites passthrough hosts (e.g. Android emulator `10.0.2.2` → `127.0.0.1`)
 - CLI fallback when MCP is unavailable
 
 ## Charles-only CA
@@ -16,17 +18,22 @@ This proxy **must** use the same CA certificate that the target app's `network_s
 
 ## Requirements
 
-- Node >= 24
+- Node >= 18
 - `adb` on PATH (for device proxy setup)
 - Charles Proxy CA (cert + key exported from Charles)
 
 ## Setup
 
-No clone needed. Install via npm:
+No clone needed. The MCP server is installed from the GitHub repo via npx (installs devDeps + runs the `prepare` build, then runs the bin):
 
 ```bash
-npx @shahfazliz/proxy-mcp
+npx -y git+https://github.com/shahfazliz/proxy-mcp --help
 ```
+
+> If you don't see new tools after an update, npx may be serving a stale cached copy. Clear it and retry:
+> ```bash
+> npx clear-npx-cache
+> ```
 
 ### 1. Extract your Charles Proxy CA
 
@@ -82,6 +89,11 @@ The `--ca-dir` must point to a directory containing `cert.pem` and `key.pem` (se
 # 1. Start proxy (port 8889, Metro dev server passthrough)
 proxy_start --passthroughHosts '["localhost:8081"]'
 
+# On an Android emulator, also map its 10.0.2.2 alias to the host loopback
+# so Metro/dev-server passthrough can reach the Mac:
+proxy_start --port 8889 --passthroughHosts '["10.0.2.2:8081"]' \
+  --hostRewrites '[{ "match": "10.0.2.2:8081", "upstream": "127.0.0.1:8081" }]'
+
 # 2. Point device at the proxy
 adb -e shell settings put global http_proxy 10.0.2.2:8889    # emulator
 adb -s <ip> shell settings put global http_proxy <lan>:8889   # physical
@@ -102,7 +114,7 @@ adb -e shell settings put global http_proxy :0
 proxy_stop
 ```
 
-## MCP tools (~15)
+## MCP tools (19)
 
 | Tool | Purpose |
 |------|---------|
@@ -113,12 +125,15 @@ proxy_stop
 | `proxy_update_transform` | Idempotent upsert of a transform rule |
 | `proxy_list_mocks` / `proxy_clear_mocks` | Manage mock responses |
 | `proxy_list_transforms` / `proxy_clear_transforms` | Manage transform rules |
-| `proxy_list_traffic` | Captured requests with transform outcomes |
+| `proxy_request_transform` | Modify outgoing requests (headers/query/body) before forwarding |
+| `proxy_list_request_transforms` / `proxy_clear_request_transforms` | Manage request-transform rules |
+| `proxy_update_request_transform` | Idempotent upsert of a request-transform rule |
+| `proxy_list_traffic` | Captured requests with transform outcomes + optional body previews |
 | `proxy_probe_transform` | One-shot fetch + dry-run patch, returns before/after |
-| `proxy_save_transforms` / `proxy_load_transforms` | Persist/restore to JSON file |
+| `proxy_save_transforms` / `proxy_load_transforms` | Persist/restore response + request transforms to JSON file |
 | `proxy_ca_info` | SHA-256 fingerprint, setup instructions |
 
-See the [wiki](./wiki/tools.md) for full parameter docs.
+Full parameter docs for each tool live in the `proxy_start` / `proxy_*` tool schemas (visible to MCP clients), plus the project wiki (a local Obsidian vault — not committed to this repo).
 
 ## App dependency
 
@@ -133,11 +148,12 @@ No device-side CA installation, no root, no Magisk needed — trust is app-bundl
 ## CLI fallback
 
 ```bash
-npx proxy-mcp-cli start --port 8889
+npx proxy-mcp-cli start --port 8889 --passthrough 10.0.2.2:8081 --host-rewrite 10.0.2.2:8081=127.0.0.1:8081
 npx proxy-mcp-cli status
 npx proxy-mcp-cli ca-info
 npx proxy-mcp-cli ca:import --p12 /path/to/charles-ssl-proxying.p12
 npx proxy-mcp-cli transform add GET "https://..." patches.json
+npx proxy-mcp-cli req-transform add GET viewBundle setHeaders='{"x-custom":"v"}' list
 npx proxy-mcp-cli traffic --filter example
 ```
 
@@ -152,6 +168,31 @@ npx proxy-mcp-cli --allowed-dir /Users/me/shared-fixtures start
 ## Metro passthrough
 
 The proxy automatically forwards Metro bundler requests (`:8081`) to the local dev server. Headers like `newrelic`, `traceparent`, `tracestate`, and `accept-encoding` are stripped from forwarded Metro requests to avoid breaking the bundler.
+
+`localhost:8081`, `127.0.0.1:8081`, and the detected LAN IP at `:8081` are always auto-added to passthrough — pass `passthroughHosts` only for additional hosts.
+
+## Android emulator host rewrites (`hostRewrites`)
+
+Android emulators reach the host machine's loopback via the special alias `10.0.2.2`. That address only exists **inside the emulator's network namespace** — it is not a real, reachable address from the Mac. When the app calls Metro through the proxy with `Host: 10.0.2.2:8081`, the proxy must translate it to `127.0.0.1:8081` before dialing, or the fetch hangs / returns `502 Error communicating with upstream server`.
+
+Pass `hostRewrites` to `proxy_start`:
+
+```json
+{
+  "port": 8889,
+  "passthroughHosts": ["10.0.2.2:8081"],
+  "hostRewrites": [
+    { "match": "10.0.2.2:8081", "upstream": "127.0.0.1:8081" }
+  ]
+}
+```
+
+- `match` — the host:port as it arrives in the request (hostname or `hostname:port`).
+- `upstream` — the host:port the proxy should actually dial instead.
+- Applies to both HTTP passthrough and WebSocket passthrough targets.
+- Add `10.0.2.2` (and its port) to `passthroughHosts` as well, so the request is not MITM'd before the rewrite happens.
+- `proxy_health` reports the active `hostRewrites` and `passthroughHosts`, so the agent can verify the mapping took effect.
+- CLI equivalent: `--host-rewrite 10.0.2.2:8081=127.0.0.1:8081`.
 
 ## Git-ignored (keep local)
 

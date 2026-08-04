@@ -15,7 +15,7 @@
  *   npm run cli -- traffic
  */
 
-import { proxy, ProxyManager, DEFAULT_PORT, resolveAllowedPath, type TransformRuleInput, type MockRuleInput, type RequestTransformInput } from "./proxy.js";
+import { proxy, ProxyManager, DEFAULT_PORT, resolveAllowedPath, type TransformRuleInput, type MockRuleInput, type RequestTransformInput, type HostRewrite } from "./proxy.js";
 import { getCaCertPath, getCaKeyPath, getCaDir, setCaDir, ensureCA, sha256Fingerprint } from "./ca.js";
 import { getLanIp } from "./net.js";
 import { readFile } from "node:fs/promises";
@@ -26,6 +26,22 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
 const execFileAsync = promisify(execFile);
+
+/** Parse repeated `--host-rewrite <match>=<upstream>` flags (e.g. 10.0.2.2:8081=127.0.0.1:8081). */
+function collectHostRewrites(args: string[]): HostRewrite[] | undefined {
+  const rewrites: HostRewrite[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== "--host-rewrite" || !args[i + 1]) continue;
+    const eqIdx = args[i + 1].indexOf("=");
+    if (eqIdx === -1) continue;
+    rewrites.push({
+      match: args[i + 1].slice(0, eqIdx),
+      upstream: args[i + 1].slice(eqIdx + 1),
+    });
+    i++;
+  }
+  return rewrites.length > 0 ? rewrites : undefined;
+}
 
 // Parse global options before the subcommand
 const caDirIdx = process.argv.indexOf("--ca-dir");
@@ -63,9 +79,10 @@ async function main() {
       const port = portIdx !== -1 ? parseInt(args[portIdx + 1], 10) : DEFAULT_PORT;
       const hostsIdx = args.indexOf("--passthrough");
       const passthroughHosts = hostsIdx !== -1 ? args[hostsIdx + 1]?.split(",") : undefined;
+      const hostRewrites = collectHostRewrites(args);
       const restoreIdx = args.indexOf("--restore");
       const restoreTransforms = restoreIdx !== -1 ? args[restoreIdx + 1] : undefined;
-      const info = await proxy.start({ port, passthroughHosts, restoreTransforms });
+      const info = await proxy.start({ port, passthroughHosts, hostRewrites, restoreTransforms });
       console.log(JSON.stringify({ status: "running", ...info }, null, 2));
       // Keep the process alive so mockttp keeps listening.
       await new Promise<void>(() => {});
@@ -221,6 +238,8 @@ Commands:
   start         Start the proxy
     --port <n>          Port (default: ${DEFAULT_PORT})
     --passthrough <s>   Comma-separated host:port passthrough entries
+    --host-rewrite <m>=<u>  Rewrite passthrough dial target (repeatable), e.g.
+                            --host-rewrite 10.0.2.2:8081=127.0.0.1:8081
   stop          Stop the proxy
   status        Proxy health / diagnostics
   ca-info       CA certificate path, fingerprint, and network info
@@ -246,6 +265,9 @@ Global options (before subcommand):
   --allowed-dir <path>  Extra directory for bodyFile / save-load / patch files
                         (repeatable). Default: only the launch directory is allowed.
                         Env: SHAH_PROXY_ALLOWED_DIRS (comma-separated).
+  --host-rewrite <m>=<u>  Rewrite passthrough dial target (repeatable), e.g.
+                        --host-rewrite 10.0.2.2:8081=127.0.0.1:8081 for the
+                        Android emulator alias. Consumed by the 'start' command.
 `);
     }
   }

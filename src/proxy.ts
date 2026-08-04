@@ -92,6 +92,17 @@ export interface RequestTransformRule {
   createdAt: string;
 }
 
+/**
+ * Rewrite the upstream dial target of a passthrough request.
+ * `match` is the host:port that arrives in the request URL / Host header
+ * (e.g. the Android emulator alias `10.0.2.2:8081`); `upstream` is the
+ * host:port the proxy should actually dial (e.g. `127.0.0.1:8081`).
+ */
+export interface HostRewrite {
+  match: string;
+  upstream: string;
+}
+
 interface TrafficEntry {
   id: string;
   method: string;
@@ -276,10 +287,27 @@ function urlMatchesPassthroughHost(url: string, entry: string): boolean {
 }
 
 /** On the proxy host, `localhost` for Metro should hit loopback IPv4. */
-function rewritePassthroughTargetUrl(url: string): string {
+function rewritePassthroughTargetUrl(url: string, rewrites: HostRewrite[] = []): string {
   const parsed = new URL(url);
   if (parsed.hostname === "localhost") {
     parsed.hostname = "127.0.0.1";
+  }
+  return applyHostRewrite(parsed.toString(), rewrites);
+}
+
+/** Apply configured host rewrites to a target URL (e.g. emulator alias 10.0.2.2 -> 127.0.0.1). */
+function applyHostRewrite(url: string, rewrites: HostRewrite[]): string {
+  if (rewrites.length === 0) return url;
+  const parsed = new URL(url);
+  for (const rw of rewrites) {
+    const { hostname: matchHost, portGlob: matchPort } = parsePassthroughHost(rw.match);
+    if (parsed.hostname.toLowerCase() !== matchHost.toLowerCase()) continue;
+    const reqPort = parsed.port || (parsed.protocol === "https:" || parsed.protocol === "wss:" ? "443" : "80");
+    if (matchPort && reqPort !== matchPort) continue;
+    const { hostname: upHost, portGlob: upPort } = parsePassthroughHost(rw.upstream);
+    parsed.hostname = upHost;
+    if (upPort) parsed.port = upPort;
+    return parsed.toString();
   }
   return parsed.toString();
 }
@@ -318,6 +346,7 @@ function buildPassthroughUrlPatterns(entries: string[]): RegExp[] {
 function resolvePassthroughRequestUrl(
   url: string,
   headers: Record<string, string | string[]>,
+  rewrites: HostRewrite[] = [],
 ): string {
   if (
     url.startsWith("http://") ||
@@ -325,14 +354,14 @@ function resolvePassthroughRequestUrl(
     url.startsWith("ws://") ||
     url.startsWith("wss://")
   ) {
-    return rewritePassthroughTargetUrl(url);
+    return rewritePassthroughTargetUrl(url, rewrites);
   }
   const host = headers.host;
   if (typeof host === "string" && host.length > 0) {
     const path = url.startsWith("/") ? url : `/${url}`;
-    return rewritePassthroughTargetUrl(`http://${host}${path}`);
+    return rewritePassthroughTargetUrl(`http://${host}${path}`, rewrites);
   }
-  return rewritePassthroughTargetUrl(url);
+  return rewritePassthroughTargetUrl(url, rewrites);
 }
 
 /** Parse a JSON path like `schedules[].contents[].consumables[]` into segments. */
@@ -437,6 +466,8 @@ function resolveMacros(set: Record<string, unknown>): Record<string, unknown> {
 export interface StartOptions {
   port?: number;
   passthroughHosts?: string[];
+  /** Rewrite the upstream dial target of passthrough requests (e.g. emulator alias 10.0.2.2 -> 127.0.0.1). */
+  hostRewrites?: HostRewrite[];
   restoreTransforms?: string;
 }
 
@@ -444,6 +475,7 @@ export class ProxyManager {
   private server: Mockttp | undefined;
   private actualPort: number | undefined;
   private passthroughHosts: string[] = [];
+  private hostRewrites: HostRewrite[] = [];
   /** Directories that user-supplied file paths (bodyFile, save/load) may touch. Empty = launch dir only. */
   private allowedDirs: string[] = [];
   /** Live rule store; the resolved body is held alongside for re-applying. */
@@ -492,6 +524,8 @@ export class ProxyManager {
     trafficCaptured: number;
     lastRequestAt?: string;
     lastError?: string;
+    hostRewrites?: HostRewrite[];
+    passthroughHosts?: string[];
     warnings?: string[];
   } {
     const warnings: string[] = [];
@@ -510,6 +544,8 @@ export class ProxyManager {
       trafficCaptured: this.traffic.size,
       lastRequestAt: this.lastRequestAt,
       lastError: this.lastError,
+      ...(this.hostRewrites.length > 0 ? { hostRewrites: this.hostRewrites } : {}),
+      ...(this.passthroughHosts.length > 0 ? { passthroughHosts: this.passthroughHosts } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
     };
   }
@@ -532,6 +568,7 @@ export class ProxyManager {
 
     const host = getLanIp();
     this.passthroughHosts = mergePassthroughHosts(host, opts.passthroughHosts);
+    this.hostRewrites = opts.hostRewrites ?? [];
 
     const { key, cert } = await ensureCA();
 
@@ -1172,11 +1209,16 @@ export class ProxyManager {
       for (const hostPort of wsHostPorts) {
         const { portGlob } = parsePassthroughHost(hostPort);
         const port = portGlob ?? "8081";
+        const rewritten = applyHostRewrite(`ws://${hostPort}`, this.hostRewrites);
+        const target =
+          rewritten !== `ws://${hostPort}`
+            ? `${new URL(rewritten).protocol}//${new URL(rewritten).host}`
+            : `ws://127.0.0.1:${port}`;
         const endpoint = await server
           .forAnyWebSocket()
           .forHost(hostPort)
           .always()
-          .thenForwardTo(`ws://127.0.0.1:${port}`);
+          .thenForwardTo(target);
         this.endpointToRule.set(endpoint.id, "ws-passthrough");
       }
     }
@@ -1196,7 +1238,7 @@ export class ProxyManager {
         headers: Record<string, string | string[]>;
         body: { buffer: Buffer };
       };
-      const targetUrl = resolvePassthroughRequestUrl(r.url, r.headers);
+      const targetUrl = resolvePassthroughRequestUrl(r.url, r.headers, this.hostRewrites);
       const forwardHeaders: Record<string, string> = {};
       for (const [key, value] of Object.entries(r.headers)) {
         if (!METRO_FORWARD_SKIP_HEADERS.has(key.toLowerCase())) {

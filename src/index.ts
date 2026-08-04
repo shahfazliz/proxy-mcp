@@ -34,7 +34,8 @@ server.registerTool(
   {
     title: "Start MITM proxy",
     description:
-      "Bring up the mockttp HTTPS MITM proxy. Returns the LAN IP : port to type into the device's manual Wi-Fi proxy settings. Unmatched requests pass through to the real headend.",
+      "Bring up the mockttp HTTPS MITM proxy. Returns the LAN IP : port to type into the device's manual Wi-Fi proxy settings. Unmatched requests pass through to the real headend. " +
+      "If the device is an Android emulator, pass hostRewrites to map its 10.0.2.2 alias (means 'host loopback', only valid inside the emulator) to 127.0.0.1 so Metro/dev-server passthrough can reach the Mac.",
     inputSchema: {
       port: z
         .number()
@@ -49,6 +50,15 @@ server.registerTool(
             "Each entry is 'hostname' or 'hostname:port'. The hostname is matched against CONNECT tunnels; port globs (e.g. ':808*') are " +
             "recorded for future HTTP-level filtering. Example: ['192.168.0.2:8081', 'localhost:8081'].",
         ),
+      hostRewrites: z
+        .array(z.object({
+          match: z.string().describe("Host or host:port as it arrives in the request, e.g. '10.0.2.2:8081'."),
+          upstream: z.string().describe("Host or host:port to dial instead, e.g. '127.0.0.1:8081'."),
+        }))
+        .optional()
+        .describe(
+          "Rewrite the upstream dial target for passthrough traffic. Use this when a device reaches the dev PC via a special alias that is not a real address on the Mac — e.g. the Android emulator's 10.0.2.2:8081 (maps to host loopback only from inside the emulator) -> 127.0.0.1:8081.",
+        ),
       restoreTransforms: z
         .string()
         .optional()
@@ -57,9 +67,9 @@ server.registerTool(
         ),
     },
   },
-  async ({ port, passthroughHosts, restoreTransforms }) => {
+  async ({ port, passthroughHosts, hostRewrites, restoreTransforms }) => {
     try {
-      const info = await proxy.start({ port, passthroughHosts, restoreTransforms });
+      const info = await proxy.start({ port, passthroughHosts, hostRewrites, restoreTransforms });
       return text({
         status: "running",
         proxy: info.url,

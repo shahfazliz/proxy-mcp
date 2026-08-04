@@ -24,3 +24,6 @@ wiki
 
 # Local test data
 fixtures/
+
+# Auto-saved transform rules on proxy stop
+transforms.json
