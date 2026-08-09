@@ -26,16 +26,14 @@ This proxy **must** use the same CA certificate that the target app's `network_s
 
 ## Setup
 
-No clone needed. The MCP server is installed from the GitHub repo via npx (installs devDeps + runs the `prepare` build, then runs the bin):
+No clone needed. The server is installed from the npm registry (prebuilt `dist/` — no devDeps, no build step), then registered with your MCP client.
 
 ```bash
-npx -y git+https://github.com/shahfazliz/proxy-mcp --help
+# verify the CLI works once
+npx -y @shahfazliz/proxy-mcp@latest --help
 ```
 
-> If you don't see new tools after an update, npx may be serving a stale cached copy. Clear it and retry:
-> ```bash
-> npx clear-npx-cache
-> ```
+> **Updates:** pin the version you install so you always know exactly what's running. When a new release is published, bump the version number in your config — you get it immediately, no cache clearing needed.
 
 ### 1. Extract your Charles Proxy CA
 
@@ -66,6 +64,8 @@ Both files must be clean PEM (no Bag Attributes, no PKCS12 wrapping). The key mu
 
 ### 2. Register with Cursor / any MCP client
 
+Pin the current version (see the npm registry for the latest). When you upgrade, just bump the number:
+
 ```json
 {
   "mcpServers": {
@@ -73,7 +73,7 @@ Both files must be clean PEM (no Bag Attributes, no PKCS12 wrapping). The key mu
       "command": "npx",
       "args": [
         "-y",
-        "git+https://github.com/shahfazliz/proxy-mcp",
+        "@shahfazliz/proxy-mcp@0.1.0",
         "--ca-dir",
         "/absolute/path/to/.proxy-ca"
       ],
@@ -82,6 +82,8 @@ Both files must be clean PEM (no Bag Attributes, no PKCS12 wrapping). The key mu
   }
 }
 ```
+
+Alternative for zero-npx: `npm install -g @shahfazliz/proxy-mcp`, then set `command` to `proxy-mcp` with the same args. Update with `npm update -g @shahfazliz/proxy-mcp`.
 
 The `--ca-dir` must point to a directory containing `cert.pem` and `key.pem` (see step 1). This is typically your Charles CA directory at `~/Library/Application Support/Charles/ca/` or an extracted `.proxy-ca/` folder in your project.
 
@@ -252,6 +254,16 @@ Pass `hostRewrites` to `proxy_start`:
 - Add `10.0.2.2` (and its port) to `passthroughHosts` as well, so the request is not MITM'd before the rewrite happens.
 - `proxy_health` reports the active `hostRewrites` and `passthroughHosts`, so the agent can verify the mapping took effect.
 - CLI equivalent: `--host-rewrite 10.0.2.2:8081=127.0.0.1:8081`.
+
+## Releasing
+
+Publish a new version to npm so users can upgrade by just bumping the version in their MCP config — no git installs, no cache clearing:
+
+```bash
+npm run release:patch   # or release:minor / release:major
+```
+
+This runs `npm version <level>` (bump + tag) then `npm publish` (builds, publishes, sets the `latest` tag). Prefer semver: `patch` for bug fixes, `minor` for new features, `major` for breaking changes.
 
 ## Git-ignored (keep local)
 
