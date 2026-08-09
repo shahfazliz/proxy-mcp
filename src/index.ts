@@ -8,16 +8,54 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { proxy, ProxyManager, DEFAULT_PORT, type JsonPatch } from "./proxy.js";
-import { getCaCertPath, getCaKeyPath, setCaDir, ensureCA, sha256Fingerprint } from "./ca.js";
+import {
+  proxy,
+  ProxyManager,
+  DEFAULT_PORT,
+  ProxyError,
+  type JsonPatch,
+} from "./proxy.js";
+import {
+  getCaCertPath,
+  getCaKeyPath,
+  setCaDir,
+  caStatus,
+} from "./ca.js";
 import { getLanIp } from "./net.js";
+import { getVersion } from "./version.js";
+import { changelogSince, compareVersions } from "./changelog.js";
 
 const execFileAsync = promisify(execFile);
 
-export const server = new McpServer({
-  name: "shah-proxy-mcp",
-  version: "0.1.0",
-});
+const SERVER_INSTRUCTIONS = `shah-proxy is an HTTPS MITM debugging proxy, controlled entirely through MCP tools.
+
+Canonical workflow:
+1. proxy_health — preflight: running state, CA validity, detected LAN IP, whether the default port is free, and suggested proxy_start arguments.
+2. proxy_start — start the proxy (returns the LAN IP:port to put in the device's proxy settings).
+3. Point the device/browser at the proxy (see ca_info for per-platform instructions).
+4. proxy_scope — restrict which hostnames are retained in the log BEFORE heavy traffic, so proxy_list_traffic output stays small.
+5. Exercise the app; inspect with proxy_list_traffic; confirm mock/transform rules matched.
+6. proxy_stop — rules are auto-saved to transforms.json for next restart.
+
+Hard preconditions:
+- The CA MUST be the Charles Proxy CA (cert.pem + key.pem). There is no auto-generation and no alternate CA — the debug app trusts only the cert baked in. proxy_health.caStatus and ca_info report whether it is present and whether cert.pem/key.pem match.
+- For TV/debug builds, trust is app-bundled (res/raw/cacert) — do NOT try to install a "device CA" on the TV; ca_info.adbPush applies only to phones/browsers.
+
+Gotchas:
+- Android emulator: its 10.0.2.2 alias means "host loopback" and only works from inside the emulator. proxy_start --hostRewrites must map it (e.g. match "10.0.2.2:8081" -> upstream "127.0.0.1:8081") together with passthroughHosts, or Metro passthrough returns 502.
+- Scope early: an unscoped proxy_list_traffic floods the agent context.
+- Dry-run patches with proxy_probe_transform BEFORE proxy_update_transform to validate paths and wire values.
+- File-access tools (bodyFile, save/load transforms) are sandboxed to the launch directory unless --allowed-dir <path> (or SHAH_PROXY_ALLOWED_DIRS) was given at startup.
+- Static mock rules short-circuit at the mock; intercept-and-transform rules forward to the real backend.
+- For "what changed in recent releases?", use proxy_whats_new.`;
+
+export const server = new McpServer(
+  {
+    name: "shah-proxy-mcp",
+    version: getVersion(),
+  },
+  { instructions: SERVER_INSTRUCTIONS },
+);
 
 function text(value: unknown) {
   const body = typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -26,6 +64,18 @@ function text(value: unknown) {
 
 function fail(err: unknown) {
   const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof ProxyError) {
+    const hint = err.hint ? `\nFix: ${err.hint}` : "";
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Error [${err.code}]: ${message}${hint}`,
+        },
+      ],
+      isError: true,
+    };
+  }
   return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
 }
 
@@ -418,41 +468,49 @@ server.registerTool(
 server.registerTool(
   "ca_info",
   {
-    title: "CA path + device install instructions",
+    title: "CA path, trust model, and install instructions",
     description:
-      "Print the persistent CA path and per-device install instructions. Optionally push the cert to a USB-connected Android phone via adb.",
+      "Report the CA in use (directory, source, fingerprint, and whether cert.pem/key.pem are present AND match) plus per-platform instructions. " +
+      "There are two distinct trust paths: (1) app-bundled trust for TV / debug builds — the cert is compiled into the app (res/raw/cacert) and the README's 'No device-side CA install, no root, no Magisk' workflow applies; " +
+      "(2) explicit device CA install for phones/browsers — install once via Settings, or adbPush=true over USB (this does NOT apply to TV builds). " +
+      "Use proxy_health.caStatus for the same validity checks without the instructions.",
     inputSchema: {
       adbPush: z
         .boolean()
         .optional()
-        .describe("If true, run `adb push` to copy the CA cert to a USB-connected Android device."),
+        .describe("If true, run `adb push` to copy the CA cert to a USB-connected Android PHONE (not TV/debug builds)."),
     },
   },
   async ({ adbPush }) => {
     try {
-      const { cert } = await ensureCA();
+      const status = await caStatus();
       const lanIp = getLanIp();
-      const fingerprint = sha256Fingerprint(cert);
+      const fingerprint = status.fingerprint;
 
       const result: Record<string, unknown> = {
-        caCert: getCaCertPath(),
-        caKey: getCaKeyPath(),
+        ...status,
+        caCert: status.certPath ?? getCaCertPath(),
+        caKey: status.keyPath ?? getCaKeyPath(),
         sha256Fingerprint: fingerprint,
         // The PEM wrapped with Bag Attributes (PKCS12) is NOT the file to bundle.
-        // Always use .proxy-ca/cert.pem (clean PEM, cert-only) for the app's cacert.pem.
+        // Always use the clean PEM cert (cert-only) for the app's cacert.pem.
         certFormat: "clean PEM (cert-only, no PKCS12 Bag Attributes)",
-        warning:
-          "The app's bundled cacert.pem MUST match this exact file (.proxy-ca/cert.pem). " +
-          "Do NOT use ~/.certificates/cacert.pem (PKCS12-wrapped format). " +
-          `Verify: after rebuilding the debug APK, check the SHA-256 fingerprint matches ${fingerprint}.`,
+        trustModel: {
+          appBundled: "TV / debug builds: the cert is compiled into the app (res/raw/cacert). No device-side install, no root, no Magisk. Rebuild the APK, then verify the fingerprint below matches the served cert.",
+          deviceInstall: "Phones / browsers: install the cert once via Settings > Security > Install from storage, or adbPush=true over USB.",
+        },
+        warning: status.valid
+          ? `The app's bundled cacert.pem MUST match this exact file (${status.certPath}). ` +
+            `Verify: after rebuilding the debug APK, check the SHA-256 fingerprint matches ${fingerprint}.`
+          : `CA is not usable: ${status.error}. Fix before starting the proxy.`,
         instructions: {
-          general: `Set the device Wi-Fi proxy to ${lanIp}:${DEFAULT_PORT}, then install the CA cert once (like the Charles CA).`,
-          fireTV: "Settings > Network: set manual proxy to the PC IP:port. Install the CA cert (sideload/file manager).",
-          chromecast: "Set manual proxy to the PC IP:port. May work without a CA for some endpoints; install the CA if HTTPS endpoints fail.",
-          androidPhone: "Wi-Fi > modify network > manual proxy to PC IP:port. Install CA via Settings > Security > Install from storage. Or use adbPush=true over USB.",
+          general: `Set the device Wi-Fi proxy to ${lanIp}:${DEFAULT_PORT}, then make sure the app trusts the CA (app-bundled for TV, one-time install for phones).`,
+          fireTV: "App-bundled trust: rebuild the debug APK bundling the clean cert as cacert.pem (no device-side CA install). Proxy: Settings > Network > manual proxy to the PC IP:port.",
+          chromecast: "App-bundled trust (TV platform). Set manual proxy to the PC IP:port. May work without a CA for some endpoints; HTTPS endpoints need the bundled cert.",
+          androidPhone: "Device install path: Wi-Fi > modify network > manual proxy to PC IP:port, then Settings > Security > Install from storage. Or use adbPush=true over USB.",
           androidTvEmulator: [
             "The emulator cannot install user CAs via Settings UI or intent.",
-            "Preferred path: rebuild the debug APK with enableSystemProxy=true, bundling .proxy-ca/cert.pem as cacert.pem.",
+            "Preferred path: rebuild the debug APK with enableSystemProxy=true, bundling the clean cert as cacert.pem (app-bundled trust).",
             `Proxy address from emulator: 10.0.2.2:${DEFAULT_PORT} (maps to host loopback).`,
             "Set proxy: adb shell settings put global http_proxy 10.0.2.2:8889",
             "Clear proxy: adb shell settings put global http_proxy :0",
@@ -491,14 +549,16 @@ server.registerTool(
 server.registerTool(
   "proxy_health",
   {
-    title: "Check proxy health and diagnostics",
+    title: "Check proxy health and diagnostics (preflight)",
     description:
-      "Returns whether the proxy is running, port, rule counts, captured traffic, last request timestamp, last error, and warnings (e.g. if proxy is stopped but device proxy may still be set). Use this first when proxy_list_traffic returns empty.",
+      "Full preflight/diagnostics. Always returns: running, version, capabilities, caStatus (dir, source, fingerprint, whether cert.pem/key.pem match), rule counts, captured-traffic count, and warnings. " +
+      "While the proxy is stopped it also returns detectedLanIp, whether the default port is free, and suggestedStart (ready-to-use proxy_start arguments). " +
+      "Use this first — it tells you everything needed to get running without shelling out.",
     inputSchema: {},
   },
   async () => {
     try {
-      return text(proxy.getHealth());
+      return text(await proxy.getHealth());
     } catch (err) {
       return fail(err);
     }
@@ -622,6 +682,51 @@ server.registerTool(
       const result = await proxy.loadTransformsFromFile(path ?? "transforms.json");
       const total = result.responseTransforms.length + result.requestTransforms.length;
       return text({ status: "loaded", total, responseTransforms: result.responseTransforms.length, requestTransforms: result.requestTransforms.length, response: result.responseTransforms, request: result.requestTransforms });
+    } catch (err) {
+      return fail(err);
+    }
+  },
+);
+
+async function fetchLatestNpmVersion(): Promise<string | undefined> {
+  try {
+    const res = await fetch(
+      "https://registry.npmjs.org/@shahfazliz%2Fproxy-mcp/latest",
+      { signal: AbortSignal.timeout(4000) },
+    );
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as { version?: string };
+    return data.version;
+  } catch {
+    return undefined;
+  }
+}
+
+server.registerTool(
+  "proxy_whats_new",
+  {
+    title: "What's new in this server?",
+    description:
+      "Report the running server version, the changelog for recent releases (optionally since a specific version), and whether a newer version is published on npm. " +
+      "Use this to learn what changed in recent releases — e.g. when in-repo skills seem out of date — without leaving the MCP.",
+    inputSchema: {
+      sinceVersion: z
+        .string()
+        .optional()
+        .describe("Only list changes after this version, e.g. '0.1.0'. Omit for all releases."),
+    },
+  },
+  async ({ sinceVersion }) => {
+    try {
+      const running = getVersion();
+      const latest = await fetchLatestNpmVersion();
+      return text({
+        runningVersion: running,
+        latestPublished: latest ?? null,
+        updateAvailable: latest ? compareVersions(latest, running) > 0 : null,
+        ...(sinceVersion ? { showingSince: sinceVersion } : {}),
+        releases: changelogSince(sinceVersion),
+      });
     } catch (err) {
       return fail(err);
     }

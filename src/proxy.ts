@@ -3,11 +3,41 @@ import { readFile, writeFile, access, realpath } from "node:fs/promises";
 import { resolve, sep, dirname, basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { ensureCA } from "./ca.js";
+import { ensureCA, caStatus } from "./ca.js";
 import { getLanIp, isPortFree, whoIsOnPort } from "./net.js";
+import { getVersion } from "./version.js";
 
 export const DEFAULT_PORT = 8889;
 const TRAFFIC_CAP = 1000;
+
+/** Stable feature flags surfaced in proxy_health so agents can detect capabilities at runtime. */
+export const CAPABILITIES = [
+  "mock_rules",
+  "mock_throttling",
+  "intercept_transform",
+  "request_transform",
+  "transform_persistence",
+  "capture_scoping",
+  "traffic_export",
+  "sensitive_header_redaction",
+  "host_rewrites",
+  "passthrough",
+  "ca_diagnostics",
+  "file_sandbox",
+  "changelog",
+] as const;
+
+/** Error with a machine-readable code + optional remediation hint, surfaced by tools. */
+export class ProxyError extends Error {
+  code: string;
+  hint?: string;
+  constructor(code: string, message: string, hint?: string) {
+    super(message);
+    this.name = "ProxyError";
+    this.code = code;
+    this.hint = hint;
+  }
+}
 
 const SUPPORTED_METHODS = [
   "GET",
@@ -598,29 +628,27 @@ export class ProxyManager {
     return this.actualPort;
   }
 
-  getHealth(): {
-    running: boolean;
-    port?: number;
-    mockRules: number;
-    transformRules: number;
-    requestTransformRules: number;
-    trafficCaptured: number;
-    lastRequestAt?: string;
-    lastError?: string;
-    hostRewrites?: HostRewrite[];
-    passthroughHosts?: string[];
-    warnings?: string[];
-  } {
+  /**
+   * Health / preflight. Always includes version, capabilities, and CA status so
+   * it doubles as a full setup readout. While stopped, also returns the detected
+   * LAN IP, whether the default port is free, and suggested `proxy_start` args.
+   */
+  async getHealth(): Promise<Record<string, unknown>> {
     const warnings: string[] = [];
     if (!this.isRunning()) {
       warnings.push(
         "Proxy not running. If the device still has a proxy configured, traffic will fail. " +
-        "Clear device proxy with: adb shell settings put global http_proxy :0",
+          "Clear device proxy with: adb shell settings put global http_proxy :0",
       );
     }
-    return {
+    const ca = await caStatus();
+    if (!ca.valid) warnings.push(`CA not ready: ${ca.error}`);
+    const base: Record<string, unknown> = {
       running: this.isRunning(),
+      version: getVersion(),
+      capabilities: CAPABILITIES,
       port: this.actualPort,
+      caStatus: ca,
       mockRules: this.rules.size,
       transformRules: this.transforms.size,
       requestTransformRules: this.requestTransforms.size,
@@ -630,8 +658,23 @@ export class ProxyManager {
       ...(this.hostRewrites.length > 0 ? { hostRewrites: this.hostRewrites } : {}),
       ...(this.passthroughHosts.length > 0 ? { passthroughHosts: this.passthroughHosts } : {}),
       ...(this.captureScope.length > 0 ? { captureScope: this.captureScope } : {}),
+      allowedDirs: this.allowedDirs,
       ...(warnings.length > 0 ? { warnings } : {}),
     };
+    if (!this.isRunning()) {
+      const lanIp = getLanIp();
+      Object.assign(base, {
+        detectedLanIp: lanIp,
+        portAvailable: await isPortFree(DEFAULT_PORT),
+        suggestedStart: {
+          host: lanIp,
+          port: DEFAULT_PORT,
+          passthroughHosts: defaultPassthroughHosts(lanIp),
+          hint: "Call proxy_start with these (or adjust). For an Android emulator, also pass hostRewrites to map its 10.0.2.2 alias to the Mac loopback.",
+        },
+      });
+    }
+    return base;
   }
 
   getCaptureScope(): string[] {
@@ -647,16 +690,22 @@ export class ProxyManager {
   async start(opts: StartOptions = {}): Promise<{ host: string; port: number; url: string }> {
     const port = opts.port ?? DEFAULT_PORT;
     if (this.server) {
-      throw new Error(
-        `Proxy already running on port ${this.actualPort}. Stop it first.`,
+      throw new ProxyError(
+        "ALREADY_RUNNING",
+        `Proxy already running on port ${this.actualPort}.`,
+        "Call proxy_stop first, or talk to the running instance.",
       );
     }
     if (!(await isPortFree(port))) {
       const occupant = await whoIsOnPort(port);
-      throw new Error(
+      throw new ProxyError(
+        "PORT_IN_USE",
         occupant
-          ? `Port ${port} is already in use by PID ${occupant.pid} (${occupant.command}). Kill it first (kill -9 ${occupant.pid}) or pass a different --port.`
-          : `Port ${port} is already in use. Pass a different 'port'.`,
+          ? `Port ${port} is already in use by PID ${occupant.pid} (${occupant.command}).`
+          : `Port ${port} is already in use.`,
+        occupant
+          ? `Kill it first: kill -9 ${occupant.pid} — or pass a different 'port'.`
+          : "Pass a different 'port'.",
       );
     }
 
@@ -665,7 +714,13 @@ export class ProxyManager {
     this.hostRewrites = opts.hostRewrites ?? [];
     this.captureScope = normalizeCaptureScope(opts.captureScope);
 
-    const { key, cert } = await ensureCA();
+    const { key, cert } = await ensureCA().catch((err) => {
+      throw new ProxyError(
+        "CA_MISSING",
+        `Cannot start: the CA is not set up. ${err instanceof Error ? err.message : String(err)}`,
+        `Run 'npx proxy-mcp-cli ca:import --p12 <charles .p12>' or place clean cert.pem/key.pem into the CA directory (see ca_info / proxy_health).`,
+      );
+    });
 
     const tlsPassthrough = this.buildTlsPassthrough();
     const server = getLocal({

@@ -85,7 +85,7 @@ Use `@latest` to always get the newest release (see the note in Setup):
 
 Alternative for zero-npx: `npm install -g @shahfazliz/proxy-mcp`, then set `command` to `proxy-mcp` with the same args. Update with `npm update -g @shahfazliz/proxy-mcp`.
 
-The `--ca-dir` must point to a directory containing `cert.pem` and `key.pem` (see step 1). This is typically your Charles CA directory at `~/Library/Application Support/Charles/ca/` or an extracted `.proxy-ca/` folder in your project.
+`--ca-dir` must point to a directory containing `cert.pem` and `key.pem` (see step 1). If you omit it entirely, the server auto-discovers the CA in order: `<cwd>/.proxy-ca`, `~/.proxy-ca`, then `~/Library/Application Support/Charles/ca` — and reports which source it used (see `proxy_health.caStatus` → `source`).
 
 ## Quick start
 
@@ -118,12 +118,12 @@ adb -e shell settings put global http_proxy :0
 proxy_stop
 ```
 
-## MCP tools (20)
+## MCP tools (21)
 
 | Tool | Purpose |
 |------|---------|
 | `proxy_start` / `proxy_stop` | Start/stop the MITM proxy |
-| `proxy_health` | Running state, rule counts, captured traffic, warnings, active scope |
+| `proxy_health` | Full preflight: running state, version, capabilities, CA status (cert/key present + matching + fingerprint), detected LAN IP, port availability, suggested `proxy_start` args |
 | `proxy_mock_response` | Static mock response for a URL pattern |
 | `proxy_mock_transform` | JSON transform rule for a URL pattern |
 | `proxy_update_transform` | Idempotent upsert of a transform rule |
@@ -136,7 +136,10 @@ proxy_stop
 | `proxy_probe_transform` | One-shot fetch + dry-run patch, returns before/after |
 | `proxy_save_transforms` / `proxy_load_transforms` | Persist/restore response + request transforms to JSON file |
 | `proxy_scope` | Set/clear capture scope: which hosts' traffic is retained in the log |
-| `ca_info` | SHA-256 fingerprint, setup instructions |
+| `proxy_whats_new` | Running vs published version + changelog of recent releases |
+| `ca_info` | CA fingerprint, trust model (app-bundled vs device install), setup instructions |
+
+The server also ships an `instructions` block (delivered during MCP initialization) that tells agents the canonical workflow and gotchas, so they don't need this README to get a first run working.
 
 Full parameter docs for each tool live in the `proxy_start` / `proxy_*` tool schemas (visible to MCP clients), plus the project wiki (a local Obsidian vault — not committed to this repo).
 

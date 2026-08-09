@@ -96,7 +96,7 @@ async function main() {
       break;
     }
     case "status": {
-      console.log(JSON.stringify(proxy.getHealth(), null, 2));
+      console.log(JSON.stringify(await proxy.getHealth(), null, 2));
       break;
     }
     case "ca-info": {
