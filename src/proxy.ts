@@ -293,6 +293,46 @@ function urlMatchesPassthroughHost(url: string, entry: string): boolean {
   return reqPort === portGlob;
 }
 
+/** Lowercase a URL's hostname for capture-scope comparison (handles scheme/path/port). */
+function captureScopeHostname(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Retention-scope match: a URL's hostname is retained when the scope list is empty
+ * (capture all) or when it equals a scope entry or is a subdomain of one.
+ * Scope entries may be bare hostnames (e.g. `example.com`) or wildcard `*.example.com`.
+ */
+function matchesCaptureScope(url: string, scope: string[]): boolean {
+  if (scope.length === 0) return true;
+  const hostname = captureScopeHostname(url);
+  if (!hostname) return false;
+  for (const entry of scope) {
+    const e = entry.trim().toLowerCase().replace(/^\*\./, "");
+    if (!e) continue;
+    if (hostname === e || hostname.endsWith(`.${e}`)) return true;
+  }
+  return false;
+}
+
+function normalizeCaptureScope(scope?: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of scope ?? []) {
+    const e = entry.trim().toLowerCase().replace(/^\*\./, "");
+    if (e && !seen.has(e)) {
+      seen.add(e);
+      out.push(e);
+    }
+  }
+  return out;
+}
+
 /** On the proxy host, `localhost` for Metro should hit loopback IPv4. */
 function rewritePassthroughTargetUrl(url: string, rewrites: HostRewrite[] = []): string {
   const parsed = new URL(url);
@@ -506,6 +546,8 @@ export interface StartOptions {
   /** Rewrite the upstream dial target of passthrough requests (e.g. emulator alias 10.0.2.2 -> 127.0.0.1). */
   hostRewrites?: HostRewrite[];
   restoreTransforms?: string;
+  /** Capture-scope hostnames: only traffic for these hosts (and subdomains) is retained in the log. Default [] = capture all. */
+  captureScope?: string[];
 }
 
 export class ProxyManager {
@@ -513,6 +555,8 @@ export class ProxyManager {
   private actualPort: number | undefined;
   private passthroughHosts: string[] = [];
   private hostRewrites: HostRewrite[] = [];
+  /** Capture-scope hostnames (retention scoping). Empty = retain all captured traffic. */
+  private captureScope: string[] = [];
   /** Directories that user-supplied file paths (bodyFile, save/load) may touch. Empty = launch dir only. */
   private allowedDirs: string[] = [];
   /** Live rule store; the resolved body is held alongside for re-applying. */
@@ -533,6 +577,8 @@ export class ProxyManager {
   private transformOutcomes = new Map<string, { outcome: string; count: number }>();
   /** Response body previews keyed by request ID (only for transform hits). */
   private bodyPreviews = new Map<string, string>();
+  /** Request IDs that passed the capture scope; response handler upserts only these. */
+  private inScopeIds = new Set<string>();
 
   isRunning(): boolean {
     return this.server !== undefined;
@@ -583,8 +629,19 @@ export class ProxyManager {
       lastError: this.lastError,
       ...(this.hostRewrites.length > 0 ? { hostRewrites: this.hostRewrites } : {}),
       ...(this.passthroughHosts.length > 0 ? { passthroughHosts: this.passthroughHosts } : {}),
+      ...(this.captureScope.length > 0 ? { captureScope: this.captureScope } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
     };
+  }
+
+  getCaptureScope(): string[] {
+    return [...this.captureScope];
+  }
+
+  /** Restrict retained traffic to the given hostnames (and their subdomains). Empty = capture all. */
+  setCaptureScope(hosts: string[]): { scope: string[]; trafficCaptured: number } {
+    this.captureScope = normalizeCaptureScope(hosts);
+    return { scope: this.getCaptureScope(), trafficCaptured: this.traffic.size };
   }
 
   async start(opts: StartOptions = {}): Promise<{ host: string; port: number; url: string }> {
@@ -606,6 +663,7 @@ export class ProxyManager {
     const host = getLanIp();
     this.passthroughHosts = mergePassthroughHosts(host, opts.passthroughHosts);
     this.hostRewrites = opts.hostRewrites ?? [];
+    this.captureScope = normalizeCaptureScope(opts.captureScope);
 
     const { key, cert } = await ensureCA();
 
@@ -1530,6 +1588,11 @@ export class ProxyManager {
     // guaranteed ordering relative to each other, so both handlers upsert.
     await server.on("request", (req) => {
       this.lastRequestAt = new Date().toISOString();
+      if (!matchesCaptureScope(req.url, this.captureScope)) {
+        this.inScopeIds.delete(req.id);
+        return;
+      }
+      this.inScopeIds.add(req.id);
       const tf = this.transformOutcomes.get(req.id);
       const bodyPreview = this.bodyPreviews.get(req.id);
       const body = req.body as unknown as Buffer | undefined;
@@ -1552,6 +1615,9 @@ export class ProxyManager {
       });
     });
     await server.on("response", (res) => {
+      if (!this.inScopeIds.has(res.id)) {
+        return;
+      }
       const tf = this.transformOutcomes.get(res.id);
       const bodyPreview = this.bodyPreviews.get(res.id);
       this.upsert(res.id, {

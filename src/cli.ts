@@ -82,8 +82,10 @@ async function main() {
       const hostRewrites = collectHostRewrites(args);
       const restoreIdx = args.indexOf("--restore");
       const restoreTransforms = restoreIdx !== -1 ? args[restoreIdx + 1] : undefined;
-      const info = await proxy.start({ port, passthroughHosts, hostRewrites, restoreTransforms });
-      console.log(JSON.stringify({ status: "running", ...info }, null, 2));
+      const scopeIdx = args.indexOf("--scope");
+      const captureScope = scopeIdx !== -1 && args[scopeIdx + 1] ? args[scopeIdx + 1].split(",") : undefined;
+      const info = await proxy.start({ port, passthroughHosts, hostRewrites, restoreTransforms, captureScope });
+      console.log(JSON.stringify({ status: "running", ...info, captureScope: proxy.getCaptureScope() }, null, 2));
       // Keep the process alive so mockttp keeps listening.
       await new Promise<void>(() => {});
       break;
@@ -197,6 +199,19 @@ async function main() {
       console.log(JSON.stringify(proxy.listTraffic(filter), null, 2));
       break;
     }
+    case "scope": {
+      const sub = args[1];
+      if (sub === "set" && args[2]) {
+        console.log(JSON.stringify(proxy.setCaptureScope(args[2].split(",")), null, 2));
+      } else if (sub === "clear") {
+        console.log(JSON.stringify(proxy.setCaptureScope([]), null, 2));
+      } else if (sub === "get") {
+        console.log(JSON.stringify({ scope: proxy.getCaptureScope() }, null, 2));
+      } else {
+        console.error("Usage: scope set <host1,host2> | clear | get");
+      }
+      break;
+    }
     case "mock": {
       const sub = args[1];
       if (sub === "add" && args[2] && args[3]) {
@@ -244,8 +259,14 @@ Commands:
     --passthrough <s>   Comma-separated host:port passthrough entries
     --host-rewrite <m>=<u>  Rewrite passthrough dial target (repeatable), e.g.
                             --host-rewrite 10.0.2.2:8081=127.0.0.1:8081
+    --scope <host1,host2>   Comma-separated hostnames to retain traffic for
+                            (default: retain all)
   stop          Stop the proxy
   status        Proxy health / diagnostics
+  scope         Manage capture scope (what proxy_list_traffic retains)
+    set <host1,host2>   Restrict retained traffic to these hosts (and subdomains)
+    clear               Retain all traffic again
+    get                 Show the current capture scope
   ca-info       CA certificate path, fingerprint, and network info
   ca:status     CA fingerprint and path status
 ca:import     Extract CA from Charles .p12

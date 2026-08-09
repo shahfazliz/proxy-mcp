@@ -65,16 +65,25 @@ server.registerTool(
         .describe(
           "Path to a JSON file previously saved by proxy_save_transforms. Transforms are restored idempotently (by method+url+regex).",
         ),
+      scope: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Capture-scope hostnames: only traffic for these hosts (and their subdomains) is retained in the log, to keep agent context small. " +
+            "Default [] (or omitted) = retain all captured traffic. Entries are hostnames or wildcard '*.example.com'. " +
+            "The proxy still MITMs and serves ALL hosts — scope only controls what is retained in proxy_list_traffic. Adjust at runtime with proxy_scope.",
+        ),
     },
   },
-  async ({ port, passthroughHosts, hostRewrites, restoreTransforms }) => {
+  async ({ port, passthroughHosts, hostRewrites, restoreTransforms, scope }) => {
     try {
-      const info = await proxy.start({ port, passthroughHosts, hostRewrites, restoreTransforms });
+      const info = await proxy.start({ port, passthroughHosts, hostRewrites, restoreTransforms, captureScope: scope });
       return text({
         status: "running",
         proxy: info.url,
         host: info.host,
         port: info.port,
+        captureScope: proxy.getCaptureScope(),
         hint: `Set the device Wi-Fi proxy to ${info.url}, then install the CA (see ca_info).`,
       });
     } catch (err) {
@@ -490,6 +499,31 @@ server.registerTool(
   async () => {
     try {
       return text(proxy.getHealth());
+    } catch (err) {
+      return fail(err);
+    }
+  },
+);
+
+server.registerTool(
+  "proxy_scope",
+  {
+    title: "Set or clear the capture scope (retention scoping)",
+    description:
+      "Restrict which traffic is retained in the proxy log (proxy_list_traffic). The proxy still intercepts and serves all hosts — this only controls what is kept, so the agent's context stays small during bug investigation. " +
+      "Pass 'hosts' to retain only matching hostnames (their subdomains are included, and '*.example.com' wildcards are allowed); omit 'hosts' or pass [] to clear scoping and retain all traffic again. " +
+      "Returns the active scope and current captured-traffic count. Already-captured entries are unaffected.",
+    inputSchema: {
+      hosts: z
+        .array(z.string())
+        .optional()
+        .describe("Hostnames to retain, e.g. ['api.cld.example.com']. Omit or [] = retain all traffic (no scoping)."),
+    },
+  },
+  async ({ hosts }) => {
+    try {
+      const result = proxy.setCaptureScope(hosts ?? []);
+      return text(result);
     } catch (err) {
       return fail(err);
     }

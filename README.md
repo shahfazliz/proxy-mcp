@@ -11,6 +11,7 @@
 - Gzip-safe — transparently decompresses, patches, and recompresses
 - Rewrites passthrough hosts (e.g. Android emulator `10.0.2.2` → `127.0.0.1`)
 - Simulates slow servers on mocks: `delayMs` processing time + `bandwidthKbps` streaming cap
+- Capture scoping (`proxy_scope`): retain only the hosts you're investigating so the log stays small
 - CLI fallback when MCP is unavailable
 
 ## Charles-only CA
@@ -115,12 +116,12 @@ adb -e shell settings put global http_proxy :0
 proxy_stop
 ```
 
-## MCP tools (19)
+## MCP tools (20)
 
 | Tool | Purpose |
 |------|---------|
 | `proxy_start` / `proxy_stop` | Start/stop the MITM proxy |
-| `proxy_health` | Running state, rule counts, captured traffic, warnings |
+| `proxy_health` | Running state, rule counts, captured traffic, warnings, active scope |
 | `proxy_mock_response` | Static mock response for a URL pattern |
 | `proxy_mock_transform` | JSON transform rule for a URL pattern |
 | `proxy_update_transform` | Idempotent upsert of a transform rule |
@@ -132,7 +133,8 @@ proxy_stop
 | `proxy_list_traffic` | Captured requests with transform outcomes + optional body previews |
 | `proxy_probe_transform` | One-shot fetch + dry-run patch, returns before/after |
 | `proxy_save_transforms` / `proxy_load_transforms` | Persist/restore response + request transforms to JSON file |
-| `proxy_ca_info` | SHA-256 fingerprint, setup instructions |
+| `proxy_scope` | Set/clear capture scope: which hosts' traffic is retained in the log |
+| `ca_info` | SHA-256 fingerprint, setup instructions |
 
 Full parameter docs for each tool live in the `proxy_start` / `proxy_*` tool schemas (visible to MCP clients), plus the project wiki (a local Obsidian vault — not committed to this repo).
 
@@ -142,7 +144,7 @@ Your debug APK must trust the proxy's CA. For an Android TV app:
 
 - Set `enableSystemProxy=true` in `apps/tv/android/gradle.properties`
 - This bakes the CA cert into the APK via `res/raw/cacert`
-- Verify the fingerprint from `proxy_ca_info` matches the app's bundled cert
+- Verify the fingerprint from `ca_info` matches the app's bundled cert
 
 No device-side CA installation, no root, no Magisk needed — trust is app-bundled.
 
@@ -157,6 +159,8 @@ npx proxy-mcp-cli transform add GET "https://..." patches.json
 npx proxy-mcp-cli req-transform add GET viewBundle setHeaders='{"x-custom":"v"}' list
 npx proxy-mcp-cli traffic --filter example
 npx proxy-mcp-cli mock add GET "https://example.com/api/people" /tmp/fixture.json --delay 2000 --bandwidth 50
+npx proxy-mcp-cli scope set api.example.com   # retain only interesting hosts
+npx proxy-mcp-cli scope get
 ```
 
 ## Mock speed control
@@ -177,6 +181,40 @@ npx proxy-mcp-cli mock add GET "https://example.com/api/people" /tmp/fixture.jso
 ```
 
 Both are optional and independent; combine them for a full "slow server" experience.
+
+## Capture scoping
+
+During bug investigation, `proxy_list_traffic` returns **every** captured host into the agent's context — noisy and token-heavy. `scope` restricts which traffic is **retained**:
+
+- The proxy still MITMs and serves **all** hosts (discovery is unaffected) — scope only controls what appears in the log.
+- Scope by **hostname**, not path: `api.example.com` keeps that host plus its subdomains (`sub.api.example.com`); `*.example.com` wildcards are also accepted.
+- Narrow it **mid-session**: start wide, then scope once the interesting host shows up.
+- Already-captured entries are unaffected when you change scope.
+
+At start (via `proxy_start` or CLI):
+
+```json
+{ "scope": ["api.example.com"] }
+```
+
+```bash
+npx proxy-mcp-cli start --port 8889 --scope api.example.com,cdn.example.com
+```
+
+At runtime (MCP tool or CLI):
+
+```
+proxy_scope --hosts '["api.example.com"]'   # set scope
+proxy_scope                                 # clear scope (retain all)
+```
+
+```bash
+npx proxy-mcp-cli scope set api.example.com,cdn.example.com
+npx proxy-mcp-cli scope clear
+npx proxy-mcp-cli scope get
+```
+
+Default `scope: []` (or unset) = capture all traffic, matching the pre-scoping behavior.
 
 ## Allowed directories
 
