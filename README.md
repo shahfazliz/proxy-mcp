@@ -33,7 +33,7 @@ No clone needed. The server is installed from the npm registry (prebuilt `dist/`
 npx -y @shahfazliz/proxy-mcp@latest --help
 ```
 
-> **Updates:** pin the version you install so you always know exactly what's running. When a new release is published, bump the version number in your config — you get it immediately, no cache clearing needed.
+> **Updates:** use `@latest` so new releases are picked up automatically — no cache clearing, no config changes. If you need reproducibility (e.g. comparing behavior across sessions), pin a specific version like `@0.1.1` instead.
 
 ### 1. Extract your Charles Proxy CA
 
@@ -64,7 +64,7 @@ Both files must be clean PEM (no Bag Attributes, no PKCS12 wrapping). The key mu
 
 ### 2. Register with Cursor / any MCP client
 
-Pin the current version (see the npm registry for the latest). When you upgrade, just bump the number:
+Use `@latest` to always get the newest release (see the note in Setup):
 
 ```json
 {
@@ -73,7 +73,7 @@ Pin the current version (see the npm registry for the latest). When you upgrade,
       "command": "npx",
       "args": [
         "-y",
-        "@shahfazliz/proxy-mcp@0.1.0",
+        "@shahfazliz/proxy-mcp@latest",
         "--ca-dir",
         "/absolute/path/to/.proxy-ca"
       ],
@@ -257,7 +257,7 @@ Pass `hostRewrites` to `proxy_start`:
 
 ## Releasing
 
-Publish a new version to npm so users can upgrade by just bumping the version in their MCP config — no git installs, no cache clearing:
+Publish a new version to npm. Users on `@latest` get it automatically on next launch — no git installs, no cache clearing:
 
 ```bash
 npm run release:patch   # or release:minor / release:major
