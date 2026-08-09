@@ -1,13 +1,15 @@
 {
   "name": "@shahfazliz/proxy-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server running a local HTTPS MITM proxy to mock headend/backend responses on real QA devices at the network level.",
   "type": "module",
   "bin": {
     "proxy-mcp": "dist/index.js",
     "proxy-mcp-cli": "dist/cli.js"
   },
-  "files": ["dist/"],
+  "files": [
+    "dist/"
+  ],
   "publishConfig": {
     "access": "public"
   },
