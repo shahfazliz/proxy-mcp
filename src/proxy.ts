@@ -2,6 +2,7 @@ import { getLocal, type Mockttp, type RequestRuleBuilder, type CompletedRequest 
 import { readFile, writeFile, access, realpath } from "node:fs/promises";
 import { resolve, sep, dirname, basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import { ensureCA } from "./ca.js";
 import { getLanIp, isPortFree, whoIsOnPort } from "./net.js";
 
@@ -27,6 +28,10 @@ export interface MockRuleInput {
   headers?: Record<string, string>;
   body?: string;
   bodyFile?: string;
+  /** Simulated server processing time: delay (ms) before the response starts. */
+  delayMs?: number;
+  /** Simulated bandwidth cap: stream the body at this many KB/s (e.g. 50 = slow network). */
+  bandwidthKbps?: number;
 }
 
 export interface MockRule {
@@ -39,6 +44,8 @@ export interface MockRule {
   bodySource: "inline" | "file" | "none";
   bodyFile?: string;
   bodyBytes: number;
+  delayMs?: number;
+  bandwidthKbps?: number;
   createdAt: string;
 }
 
@@ -449,6 +456,36 @@ function resolveNowPlus(macro: string): string {
   return new Date(Date.now() + ms).toISOString();
 }
 
+/**
+ * Stream `body` at `kbps` kilobytes/second to simulate a slow download
+ * (e.g. a big JSON object arriving from a far-away server). Emits ~8 chunks/s,
+ * each chunk sized to the target throughput, so the client sees progressive
+ * arrival and respects backpressure via the Readable interface.
+ */
+function throttledStream(body: string | undefined, kbps: number): Readable {
+  const buf = body ? Buffer.from(body, "utf8") : Buffer.alloc(0);
+  const chunksPerSecond = 8;
+  const chunkBytes = Math.max(1, Math.round((kbps * 1024) / chunksPerSecond));
+  const intervalMs = 1000 / chunksPerSecond;
+  let offset = 0;
+  return new Readable({
+    read() {
+      if (offset >= buf.length) {
+        this.push(null);
+        return;
+      }
+      const chunk = buf.subarray(offset, offset + chunkBytes);
+      offset += chunk.length;
+      if (offset >= buf.length) {
+        this.push(chunk);
+        this.push(null);
+      } else {
+        setTimeout(() => this.push(chunk), intervalMs);
+      }
+    },
+  });
+}
+
 /** Resolve macros in a `set` record at rule-creation time (static values pass through). */
 function resolveMacros(set: Record<string, unknown>): Record<string, unknown> {
   const resolved: Record<string, unknown> = {};
@@ -815,6 +852,8 @@ export class ProxyManager {
       bodySource,
       bodyFile: input.bodyFile,
       bodyBytes: body ? Buffer.byteLength(body) : 0,
+      delayMs: input.delayMs,
+      bandwidthKbps: input.bandwidthKbps,
       createdAt: new Date().toISOString(),
     };
 
@@ -1157,10 +1196,13 @@ export class ProxyManager {
     this.endpointToRule.clear();
     await this.subscribeTraffic(server);
 
-    // 1. Static mock rules (fast-path reply)
+    // 1. Static mock rules (fast-path reply, optionally delayed + bandwidth-capped)
     for (const { rule, body } of this.rules.values()) {
-      const builder = this.builderForMethod(server, rule.method, rule);
-      const endpoint = await builder.thenReply(rule.status, body, rule.headers);
+      const base = this.builderForMethod(server, rule.method, rule);
+      const builder = rule.delayMs ? base.delay(rule.delayMs) : base;
+      const endpoint = rule.bandwidthKbps
+        ? await builder.thenStream(rule.status, throttledStream(body, rule.bandwidthKbps), rule.headers)
+        : await builder.thenReply(rule.status, body, rule.headers);
       this.endpointToRule.set(endpoint.id, rule.id);
     }
 

@@ -106,7 +106,8 @@ server.registerTool(
   {
     title: "Add a mock rule",
     description:
-      "Add an in-memory mock rule. Matches on HTTP method + URL pattern (glob/substring by default against the full URL; set regex=true for a raw regex). Body is supplied inline or via a fixture file on disk. Provide either 'body' or 'bodyFile', not both.",
+      "Add an in-memory mock rule. Matches on HTTP method + URL pattern (glob/substring by default against the full URL; set regex=true for a raw regex). Body is supplied inline or via a fixture file on disk. Provide either 'body' or 'bodyFile', not both. " +
+      "Optionally simulate a slow server: delayMs waits before responding (processing time), bandwidthKbps streams the body at a KB/s rate (slow network / big object from far away).",
     inputSchema: {
       method: z
         .string()
@@ -127,6 +128,17 @@ server.registerTool(
         .string()
         .optional()
         .describe("Path to a fixture file whose contents become the response body (large payloads). Must be inside the proxy's allowed directories (default: the folder the proxy was launched from). Add --allowed-dir <path> at launch to permit others."),
+      delayMs: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Simulated server processing time: delay in milliseconds before the response starts (e.g. 3000 = 3s before the first byte)."),
+      bandwidthKbps: z
+        .number()
+        .positive()
+        .optional()
+        .describe("Simulated network bandwidth cap: stream the body at this many KB/s (e.g. 50 = slow-network feel, big objects arrive progressively)."),
     },
   },
   async (args) => {

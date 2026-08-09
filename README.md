@@ -10,6 +10,7 @@
 - Tracks per-request transform outcomes — distinguish patched, no_match, error
 - Gzip-safe — transparently decompresses, patches, and recompresses
 - Rewrites passthrough hosts (e.g. Android emulator `10.0.2.2` → `127.0.0.1`)
+- Simulates slow servers on mocks: `delayMs` processing time + `bandwidthKbps` streaming cap
 - CLI fallback when MCP is unavailable
 
 ## Charles-only CA
@@ -155,7 +156,27 @@ npx proxy-mcp-cli ca:import --p12 /path/to/charles-ssl-proxying.p12
 npx proxy-mcp-cli transform add GET "https://..." patches.json
 npx proxy-mcp-cli req-transform add GET viewBundle setHeaders='{"x-custom":"v"}' list
 npx proxy-mcp-cli traffic --filter example
+npx proxy-mcp-cli mock add GET "https://example.com/api/people" /tmp/fixture.json --delay 2000 --bandwidth 50
 ```
+
+## Mock speed control
+
+`proxy_mock_response` (and the CLI `mock add` command) accept two optional knobs to simulate a slow, far-away server — useful when you want to reproduce loading states, spinners, or timeouts on the device:
+
+- `delayMs` — server processing time. The proxy waits this long before sending a single byte.
+- `bandwidthKbps` — network bandwidth cap. The body is re-streamed at this rate (KB/s), so a large payload arrives progressively instead of all at once.
+
+```json
+{
+  "method": "GET",
+  "url": "api.example.com/v1/user",
+  "bodyFile": "/tmp/user.json",
+  "delayMs": 2000,
+  "bandwidthKbps": 50
+}
+```
+
+Both are optional and independent; combine them for a full "slow server" experience.
 
 ## Allowed directories
 

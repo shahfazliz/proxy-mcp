@@ -201,17 +201,21 @@ async function main() {
       const sub = args[1];
       if (sub === "add" && args[2] && args[3]) {
         const bodyPath = args[4];
+        const delayIdx = args.indexOf("--delay");
+        const bwIdx = args.indexOf("--bandwidth");
         const input: MockRuleInput = {
           method: args[2],
           url: args[3],
           ...(bodyPath ? { bodyFile: bodyPath } : {}),
+          ...(delayIdx !== -1 && args[delayIdx + 1] ? { delayMs: parseInt(args[delayIdx + 1], 10) } : {}),
+          ...(bwIdx !== -1 && args[bwIdx + 1] ? { bandwidthKbps: parseFloat(args[bwIdx + 1]) } : {}),
         };
         const rule = await proxy.addMock(input);
         console.log(JSON.stringify({ status: "added", rule }, null, 2));
       } else if (sub === "list") {
         console.log(JSON.stringify(proxy.listMocks(), null, 2));
       } else {
-        console.error("Usage: mock add <method> <url> [bodyFile] | list");
+        console.error("Usage: mock add <method> <url> [bodyFile] [--delay <ms>] [--bandwidth <kbps>] | list");
       }
       break;
     }
@@ -256,7 +260,9 @@ ca:import     Extract CA from Charles .p12
     list                                List request transforms
   traffic [filter]                      View captured traffic
   mock          Manage mock rules
-    add <method> <url> [bodyFile]       Add a mock
+    add <method> <url> [bodyFile]      Add a mock
+        --delay <ms>          Simulated server processing delay
+        --bandwidth <kbps>    Stream body at KB/s (slow network)
     list                                List mocks
   help          This help message
 
