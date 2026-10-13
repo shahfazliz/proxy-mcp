@@ -153,6 +153,13 @@ Your debug APK must trust the proxy's CA. For an Android TV app:
 
 No device-side CA installation, no root, no Magisk needed — trust is app-bundled.
 
+### tvOS / iOS (Apple TV)
+
+Apple devices reject the proxy's leaf certificates unless the leaf's issuer
+bytes exactly match the CA subject bytes. proxy_health reports
+`leafIssuerCheck` and `tlsHandshakeFailures` so a trust failure is visible —
+the fix is in the server, not the app.
+
 ## CLI fallback
 
 ```bash
