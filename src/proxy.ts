@@ -1,11 +1,13 @@
 import { getLocal, type Mockttp, type RequestRuleBuilder, type CompletedRequest } from "mockttp";
 import { readFile, writeFile, access, realpath } from "node:fs/promises";
 import { resolve, sep, dirname, basename, join } from "node:path";
+import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { ensureCA, caStatus } from "./ca.js";
 import { getLanIp, isPortFree, whoIsOnPort } from "./net.js";
 import { getVersion } from "./version.js";
+import { getIssuerCheck, installIssuerFix } from "./issuer-fix.js";
 
 export const DEFAULT_PORT = 8889;
 const TRAFFIC_CAP = 1000;
@@ -580,6 +582,16 @@ export interface StartOptions {
   captureScope?: string[];
 }
 
+/** One failed TLS handshake from a client, kept so a silent trust failure is visible. */
+export interface TlsFailureEntry {
+  at: string;
+  hostname?: string;
+  clientIp?: string;
+  failureCause: string;
+}
+
+const TLS_FAILURE_CAP = 50;
+
 export class ProxyManager {
   private server: Mockttp | undefined;
   private actualPort: number | undefined;
@@ -609,6 +621,9 @@ export class ProxyManager {
   private bodyPreviews = new Map<string, string>();
   /** Request IDs that passed the capture scope; response handler upserts only these. */
   private inScopeIds = new Set<string>();
+  /** Most recent TLS handshake failures (newest last). */
+  private tlsFailures: TlsFailureEntry[] = [];
+  private tlsFailureCount = 0;
 
   isRunning(): boolean {
     return this.server !== undefined;
@@ -643,6 +658,14 @@ export class ProxyManager {
     }
     const ca = await caStatus();
     if (!ca.valid) warnings.push(`CA not ready: ${ca.error}`);
+    if (this.tlsFailures.some((f) => f.failureCause === "cert-rejected")) {
+      warnings.push(
+        "Clients rejected the proxy certificate (cert-rejected). Check the CA is trusted on the device. " +
+          "On Apple devices check leafIssuerCheck in this health report.",
+      );
+    }
+    const issuerCheck = getIssuerCheck();
+    if (issuerCheck && !issuerCheck.isIssuerBytesMatch) warnings.push(issuerCheck.detail ?? "Leaf issuer check failed.");
     const base: Record<string, unknown> = {
       running: this.isRunning(),
       version: getVersion(),
@@ -655,6 +678,11 @@ export class ProxyManager {
       trafficCaptured: this.traffic.size,
       lastRequestAt: this.lastRequestAt,
       lastError: this.lastError,
+      leafIssuerCheck: getIssuerCheck(),
+      tlsHandshakeFailures: {
+        total: this.tlsFailureCount,
+        recent: this.tlsFailures.slice(-10),
+      },
       ...(this.hostRewrites.length > 0 ? { hostRewrites: this.hostRewrites } : {}),
       ...(this.passthroughHosts.length > 0 ? { passthroughHosts: this.passthroughHosts } : {}),
       ...(this.captureScope.length > 0 ? { captureScope: this.captureScope } : {}),
@@ -722,6 +750,9 @@ export class ProxyManager {
       );
     });
 
+    installIssuerFix();
+    this.tlsFailures = [];
+    this.tlsFailureCount = 0;
     const tlsPassthrough = this.buildTlsPassthrough();
     const server = getLocal({
       https: { key, cert, ...(tlsPassthrough.length > 0 ? { tlsPassthrough } : {}) },
@@ -1249,14 +1280,30 @@ export class ProxyManager {
       includeSensitiveHeaders: opts?.includeSensitiveHeaders,
     });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    if (format === "json") {
-      const path = resolve(`traffic-${stamp}.json`);
-      await writeFile(path, JSON.stringify(entries, null, 2));
-      return path;
+    const fileName = `traffic-${stamp}.${format}`;
+    const content = JSON.stringify(format === "json" ? entries : this.toHar(entries), null, 2);
+    return this.writeExportFile(fileName, content);
+  }
+
+  /**
+   * An MCP host often starts the server with cwd "/", which is read-only on macOS.
+   * Try the first allowed dir, then the launch dir, then the OS temp dir.
+   */
+  private async writeExportFile(fileName: string, content: string): Promise<string> {
+    const dirs = [...new Set([...this.allowedDirs.slice(0, 1), resolve("."), tmpdir()])];
+    let lastErr: unknown;
+    for (const dir of dirs) {
+      const path = join(dir, fileName);
+      try {
+        await writeFile(path, content);
+        return path;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "EROFS" && code !== "EACCES" && code !== "EPERM") throw err;
+        lastErr = err;
+      }
     }
-    const path = resolve(`traffic-${stamp}.har`);
-    await writeFile(path, JSON.stringify(this.toHar(entries), null, 2));
-    return path;
+    throw lastErr;
   }
 
   private toHar(entries: TrafficEntry[]): object {
@@ -1385,7 +1432,7 @@ export class ProxyManager {
   /** Forward Metro / dev-server HTTP without MITM (rewrites localhost → 127.0.0.1). */
   private async handleHttpPassthrough(
     req: CompletedRequest,
-  ): Promise<{ status: number; body?: string; headers?: Record<string, string> }> {
+  ): Promise<{ status: number; body?: string; rawBody?: Buffer; headers?: Record<string, string> }> {
     try {
       const r = req as unknown as {
         method: string;
@@ -1407,7 +1454,8 @@ export class ProxyManager {
         body: ["GET", "HEAD"].includes(r.method) ? undefined : r.body.buffer,
       });
 
-      const bodyText = await upstream.text();
+      // Binary bodies (PNG, fonts) must stay raw; a utf8 decode turns 0x89 into U+FFFD.
+      const bodyBuffer = Buffer.from(await upstream.arrayBuffer());
       const responseHeaders: Record<string, string> = {};
       upstream.headers.forEach((value, key) => {
         if (!PASSTHROUGH_SKIP_HEADERS.has(key.toLowerCase())) {
@@ -1417,7 +1465,7 @@ export class ProxyManager {
 
       return {
         status: upstream.status,
-        body: bodyText,
+        rawBody: bodyBuffer,
         headers: responseHeaders,
       };
     } catch (err) {
@@ -1435,7 +1483,7 @@ export class ProxyManager {
   private async handleTransform(
     tf: TransformRule,
     req: CompletedRequest,
-  ): Promise<{ status: number; body?: string; headers?: Record<string, string> }> {
+  ): Promise<{ status: number; body?: string; rawBody?: Buffer; headers?: Record<string, string> }> {
     try {
       const r = req as unknown as {
         id: string;
@@ -1460,7 +1508,8 @@ export class ProxyManager {
         body: ["GET", "HEAD"].includes(r.method) ? undefined : r.body.buffer,
       });
 
-      const bodyText = await upstream.text();
+      const bodyBuffer = Buffer.from(await upstream.arrayBuffer());
+      const bodyText = bodyBuffer.toString("utf8");
 
       // Try to parse as JSON and apply patches. Track outcome.
       let modifiedBody: string;
@@ -1500,7 +1549,7 @@ export class ProxyManager {
 
       return {
         status: upstream.status,
-        body: modifiedBody,
+        ...(modifiedBody !== bodyText ? { body: modifiedBody } : { rawBody: bodyBuffer }),
         headers: modifiedHeaders,
       };
     } catch (err) {
@@ -1518,7 +1567,7 @@ export class ProxyManager {
   private async handleRequestTransform(
     rt: RequestTransformRule,
     req: CompletedRequest,
-  ): Promise<{ status: number; body?: string; headers?: Record<string, string> }> {
+  ): Promise<{ status: number; body?: string; rawBody?: Buffer; headers?: Record<string, string> }> {
     try {
       const r = req as unknown as {
         id: string;
@@ -1575,7 +1624,8 @@ export class ProxyManager {
             : r.body.buffer,
       });
 
-      const bodyText = await upstream.text();
+      // Binary bodies (PNG, fonts) must stay raw; a utf8 decode turns 0x89 into U+FFFD.
+      const bodyBuffer = Buffer.from(await upstream.arrayBuffer());
       const responseHeaders: Record<string, string> = {};
       upstream.headers.forEach((value, key) => {
         if (!PASSTHROUGH_SKIP_HEADERS.has(key.toLowerCase())) {
@@ -1585,7 +1635,7 @@ export class ProxyManager {
 
       return {
         status: upstream.status,
-        body: bodyText,
+        rawBody: bodyBuffer,
         headers: responseHeaders,
       };
     } catch (err) {
@@ -1668,6 +1718,16 @@ export class ProxyManager {
         responseBodyPreview: bodyPreview,
         requestBodyPreview,
       });
+    });
+    await server.on("tls-client-error", (failure) => {
+      this.tlsFailureCount += 1;
+      this.tlsFailures.push({
+        at: new Date().toISOString(),
+        hostname: failure.tlsMetadata?.sniHostname ?? failure.destination?.hostname,
+        clientIp: failure.remoteIpAddress,
+        failureCause: failure.failureCause,
+      });
+      if (this.tlsFailures.length > TLS_FAILURE_CAP) this.tlsFailures.shift();
     });
     await server.on("response", (res) => {
       if (!this.inScopeIds.has(res.id)) {
