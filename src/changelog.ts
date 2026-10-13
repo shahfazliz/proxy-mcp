@@ -12,16 +12,26 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.1.3",
+    title: "Apple TV / iOS HTTPS trust fix",
+    date: "2026-08-09",
+    notes: [
+      "Fix tvOS/iOS ATS -9802: leaf certificates now copy the CA subject bytes into their issuer. mockttp re-encoded it (UTF8String -> PrintableString), so Apple could not match the leaf to the CA. proxy_health reports leafIssuerCheck.",
+      "proxy_health reports tlsHandshakeFailures (hostname, client IP, cause) and warns on cert-rejected, so a trust failure on the device is no longer silent.",
+      "proxy_list_traffic export no longer fails with EROFS when the MCP host starts the server in '/': it writes to the first allowed dir, then the launch dir, then the OS temp dir.",
+    ],
+  },
+  {
     version: "0.1.2",
     title: "Agent-facing discoverability & setup UX",
     date: "2026-08-09",
     notes: [
-      "Server ships level `instructions` describing the canonical workflow, preconditions, and gotchas.",
+      "Server ships an instructions block describing the canonical workflow, preconditions, and gotchas.",
       "proxy_health is now a full preflight: version, capabilities, CA status (cert/key present + matching + fingerprint), detected LAN IP, whether the default port is free, and suggested proxy_start arguments.",
       "proxy_whats_new reports the running vs latest published version and the changelog.",
-      "ca_info now distinguishes app-bundled trust (TV/debug) vs device CA install (phone/browser), returns a structured caStatus, and validates that cert.pem and key.pem actually match each other.",
+      "ca_info distinguishes app-bundled trust (TV/debug) vs device CA install (phone/browser), returns a structured caStatus, and validates cert.pem/key.pem match.",
       "Structured startup errors (ALREADY_RUNNING, PORT_IN_USE, CA_MISSING) with remediation hints.",
-      "--ca-dir now auto-discovers a usable CA (default .proxy-ca or the Charles CA folder) when not configured, and reports which source is used.",
+      "--ca-dir auto-discovers a usable CA (.proxy-ca, ~/.proxy-ca, or the Charles CA folder) when not configured.",
     ],
   },
   {
@@ -31,7 +41,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     notes: [
       "Capture scoping (proxy_scope) so the traffic log stays small during investigation.",
       "Mock speed control: delayMs + bandwidth throttling simulation (slow, far-away servers).",
-      "Host rewrites so Android emulator 10.0.2.2 alias reaches the dev PC's Metro/dev-server.",
+      "Host rewrites so the Android emulator 10.0.2.2 alias reaches the dev PC's Metro/dev-server.",
       "Published as a scoped npm package with prebuilt dist; no git installs or cache clearing.",
     ],
   },
